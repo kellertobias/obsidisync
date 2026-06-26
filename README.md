@@ -2,7 +2,7 @@
 
 This project contains:
 
-- An Obsidian plugin that runs on desktop, iOS, and iPadOS.
+- An Obsidian plugin that runs on iOS, iPadOS, and macOS.
 - A Rust sync server that performs all native Git operations.
 
 The device does not run Git. The plugin sends changed files to:

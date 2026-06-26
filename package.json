@@ -1,7 +1,7 @@
 {
   "name": "obsidian-ios-git-sync",
   "version": "0.1.0",
-  "description": "Obsidian mobile sync plugin plus a low-footprint server-side Git worker.",
+  "description": "Obsidian sync plugin for iOS, iPadOS, and macOS plus a low-footprint server-side Git worker.",
   "main": "main.js",
   "scripts": {
     "build": "npm run build:plugin && npm run build:server",
@@ -9,7 +9,9 @@
     "build:server": "cargo build --manifest-path rust-server/Cargo.toml --release",
     "dev": "node esbuild.config.mjs",
     "start:server": "cargo run --manifest-path rust-server/Cargo.toml",
-    "test": "npm run build:plugin && cargo test --manifest-path rust-server/Cargo.toml"
+    "test": "npm run test:plugin && npm run build:plugin && npm run test:server",
+    "test:plugin": "node -e \"require('fs').rmSync('.tmp-tests',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/*.test.js",
+    "test:server": "cargo test --manifest-path rust-server/Cargo.toml"
   },
   "keywords": [
     "obsidian",

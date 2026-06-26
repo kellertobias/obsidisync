@@ -3,7 +3,7 @@
   "name": "iOS Git Sync",
   "version": "0.1.0",
   "minAppVersion": "1.5.0",
-  "description": "Sync an Obsidian vault through a self-hosted server that performs native Git operations for iOS and iPadOS.",
+  "description": "Sync an Obsidian vault through a self-hosted server that performs native Git operations for iOS, iPadOS, and macOS.",
   "author": "",
   "authorUrl": "",
   "isDesktopOnly": false

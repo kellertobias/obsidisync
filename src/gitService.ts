@@ -9,6 +9,7 @@ import {
   SyncResponse,
   VersionFileResponse
 } from "./protocol";
+import { getDeviceName } from "./runtime";
 import { IosGitSyncSettings } from "./settings";
 import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./security";
 import { VaultState } from "./vaultState";
@@ -294,7 +295,7 @@ export class GitService {
   }
 
   private deviceName(): string {
-    return this.settings.deviceName || navigator.platform || "Obsidian device";
+    return getDeviceName(this.settings.deviceName);
   }
 }
 

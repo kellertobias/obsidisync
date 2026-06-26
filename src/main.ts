@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
+import { createClientId } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 import { FileVersionsModal } from "./versionModal";
 
@@ -12,7 +13,7 @@ export default class IosGitSyncPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     if (!this.settings.clientId) {
-      this.settings.clientId = crypto.randomUUID();
+      this.settings.clientId = createClientId();
       await this.saveSettings();
     }
 
