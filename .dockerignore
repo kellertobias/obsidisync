@@ -1,0 +1,9 @@
+.git
+.agents
+.codex
+node_modules
+main.js
+rust-server/target
+npm-debug.log
+Dockerfile
+.DS_Store

@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, live, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: opensource/obsync
+
+jobs:
+  plugin:
+    name: Obsidian Plugin Build
+    runs-on: ubuntu-latest
+    container:
+      image: registry.tokenet.de/shared/build-environments/default:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build plugin
+        run: npm run build:plugin
+
+  rust-server:
+    name: Rust Server Lint & Test
+    runs-on: ubuntu-latest
+    container:
+      image: registry.tokenet.de/shared/build-environments/default:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-server/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust-server/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --manifest-path rust-server/Cargo.toml --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --manifest-path rust-server/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --manifest-path rust-server/Cargo.toml
+
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: [plugin, rust-server]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build & push image
+        uses: https://git.tokenet.de/shared/build-actions/docker-build@main
+        with:
+          registry: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/live' || github.ref == 'refs/heads/master') && 'registry.tokenet.de' || '' }}
+          username: ${{ env.REGISTRY_USERNAME }}
+          password: ${{ env.REGISTRY_PASSWORD }}
+          image: ${{ env.IMAGE_NAME }}
+          tag: ${{ github.sha }},latest
+          cache: 'false'
+
+  update-nas-image:
+    name: Update NAS image
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/live' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Update NAS image
+        run: |
+          IMAGE="registry.tokenet.de/${{ env.IMAGE_NAME }}:latest"
+          BODY="$(mktemp)"
+
+          echo "NAS update endpoint: ${NAS_CONTROL_PULL_IMAGE_URL:-<missing>}"
+          echo "NAS update image: $IMAGE"
+
+          STATUS="$(
+            curl -sS \
+              -o "$BODY" \
+              -w "%{http_code}" \
+              -X POST "$NAS_CONTROL_PULL_IMAGE_URL" \
+              -H 'Content-Type: application/json' \
+              --data "{\"image\":\"$IMAGE\"}"
+          )"
+
+          echo "NAS update status: $STATUS"
+          echo "NAS update response:"
+          cat "$BODY"
+          echo
+
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            exit 1
+          fi

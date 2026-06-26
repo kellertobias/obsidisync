@@ -1,0 +1,634 @@
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use obsidian_git_sync_server::auth::{normalize_user_claim, AuthVerifier};
+use obsidian_git_sync_server::git::git;
+use obsidian_git_sync_server::http::{router, AppState};
+use obsidian_git_sync_server::paths::{is_text_or_code_path, validate_vault_path};
+use obsidian_git_sync_server::protocol::{
+    ClientChange, RegisterRequest, ResolveRequest, ResolvedFile, SyncRequest, SyncStatus,
+};
+use obsidian_git_sync_server::vault::VaultService;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
+use tokio::fs;
+use tower::ServiceExt;
+
+const USER: &str = "alice";
+const VAULT: &str = "notes";
+
+#[test]
+fn validates_paths_and_user_claims() {
+    assert_eq!(normalize_user_claim("Alice@example.com").unwrap(), "alice");
+    assert_eq!(
+        validate_vault_path("Folder/Note.md").unwrap(),
+        "Folder/Note.md"
+    );
+    assert!(validate_vault_path("../escape.md").is_err());
+    assert!(validate_vault_path(".git/config").is_err());
+    assert!(is_text_or_code_path("Note.md"));
+    assert!(is_text_or_code_path("src/main.rs"));
+    assert!(!is_text_or_code_path("photo.png"));
+
+    let verifier = AuthVerifier::StaticTokenForDev {
+        token: "secret".to_string(),
+        user: "alice".to_string(),
+    };
+    drop(verifier);
+}
+
+#[test]
+fn protocol_matches_plugin_json_field_names() {
+    let change: ClientChange = serde_json::from_value(serde_json::json!({
+        "op": "upsert",
+        "path": "Note.md",
+        "contentBase64": "aGVsbG8=",
+        "sha256": "abc",
+        "mtime": 123
+    }))
+    .unwrap();
+
+    match change {
+        ClientChange::Upsert {
+            path,
+            content_base64,
+            sha256,
+            mtime,
+        } => {
+            assert_eq!(path, "Note.md");
+            assert_eq!(content_base64, "aGVsbG8=");
+            assert_eq!(sha256.as_deref(), Some("abc"));
+            assert_eq!(mtime, Some(123));
+        }
+        ClientChange::Delete { .. } => panic!("expected upsert"),
+    }
+
+    let response = serde_json::to_value(
+        obsidian_git_sync_server::protocol::ServerFileChange::Upsert {
+            path: "Note.md".to_string(),
+            content_base64: "aGVsbG8=".to_string(),
+            sha256: "abc".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(response["contentBase64"], "aGVsbG8=");
+}
+
+#[tokio::test]
+async fn http_authorization_rejects_cross_user_access() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        AppState {
+            vaults: VaultService::new(root.path().join("data")),
+            auth: AuthVerifier::StaticTokenForDev {
+                token: "secret".to_string(),
+                user: "alice".to_string(),
+            },
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let missing_auth = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/personal/register")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&register_request(Path::new("/tmp/remote.git"))).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_auth.status(), StatusCode::UNAUTHORIZED);
+
+    let wrong_user = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/bob/vaults/personal/register")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&register_request(Path::new("/tmp/remote.git"))).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_user.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn http_rejects_oversized_sync_bodies() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        AppState {
+            vaults: VaultService::new(root.path().join("data")),
+            auth: AuthVerifier::StaticTokenForDev {
+                token: "secret".to_string(),
+                user: "alice".to_string(),
+            },
+        },
+        128,
+        Vec::new(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/personal/sync")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from("x".repeat(1024)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn http_does_not_allow_cross_origin_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        AppState {
+            vaults: VaultService::new(root.path().join("data")),
+            auth: AuthVerifier::StaticTokenForDev {
+                token: "secret".to_string(),
+                user: "alice".to_string(),
+            },
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .is_none());
+}
+
+#[tokio::test]
+async fn production_service_rejects_local_git_remotes() {
+    let fixture = GitFixture::new().await;
+    let service = VaultService::new(fixture.root.path().join("data"));
+    let error = service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("local git remotes are disabled"));
+}
+
+#[tokio::test]
+async fn syncs_text_history_and_read_only_file_versions() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+
+    let registration = service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    assert_eq!(first.status, SyncStatus::Ok);
+    assert_eq!(file_text(&first.files, "Note.md"), "hello\n");
+
+    let base = first.server_head.clone();
+    let edited = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![upsert("Note.md", b"hello from mobile\n")],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.status, SyncStatus::Ok);
+
+    let history = service.history(USER, VAULT, Some("Note.md")).await.unwrap();
+    assert!(history.len() >= 2);
+
+    let old = service
+        .file_at_version(USER, VAULT, "Note.md", base.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert!(old.read_only);
+    assert_eq!(
+        String::from_utf8(STANDARD.decode(old.content_base64).unwrap()).unwrap(),
+        "hello\n"
+    );
+
+    let clone = fixture.clone_remote("check").await;
+    assert_eq!(
+        fs::read_to_string(clone.join("Note.md")).await.unwrap(),
+        "hello from mobile\n"
+    );
+    assert_eq!(registration.user, USER);
+}
+
+#[tokio::test]
+async fn rebases_remote_changes_and_keeps_history_linear() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+
+    fixture
+        .commit_remote_file("remote-update", "Remote.md", b"remote\n", "remote update")
+        .await;
+
+    let synced = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: first.server_head.clone(),
+                changes: vec![upsert("Client.md", b"client\n")],
+                ..empty_sync(first.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(synced.status, SyncStatus::Ok);
+
+    let clone = fixture.clone_remote("linear-check").await;
+    assert_eq!(
+        fs::read_to_string(clone.join("Remote.md")).await.unwrap(),
+        "remote\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clone.join("Client.md")).await.unwrap(),
+        "client\n"
+    );
+    let parents = git(Some(&clone), &["log", "--format=%P"], &[0])
+        .await
+        .unwrap();
+    for line in String::from_utf8(parents.stdout).unwrap().lines() {
+        assert!(
+            line.split_whitespace().count() <= 1,
+            "history should not contain merge commits"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stores_binary_content_outside_git_and_versions_manifest() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let image = vec![0, 1, 2, 3, 255];
+
+    let synced = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: first.server_head.clone(),
+                changes: vec![upsert("Images/photo.png", &image)],
+                ..empty_sync(first.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(synced.status, SyncStatus::Ok);
+
+    let repo = fixture
+        .root
+        .path()
+        .join("data/users/alice/vaults/notes/repo");
+    let tracked_image = git(Some(&repo), &["ls-files", "Images/photo.png"], &[0])
+        .await
+        .unwrap();
+    assert!(tracked_image.stdout.is_empty());
+    let tracked_manifest = git(
+        Some(&repo),
+        &["ls-files", ".obsidian-git-sync/binary-manifest.json"],
+        &[0],
+    )
+    .await
+    .unwrap();
+    assert!(!tracked_manifest.stdout.is_empty());
+
+    let version = service
+        .file_at_version(
+            USER,
+            VAULT,
+            "Images/photo.png",
+            synced.server_head.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(STANDARD.decode(version.content_base64).unwrap(), image);
+
+    let second = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: synced.server_head.clone(),
+                changes: vec![upsert("Images/other.png", &[9, 8, 7])],
+                ..empty_sync(synced.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status, SyncStatus::Ok);
+    let photo_history = service
+        .history(USER, VAULT, Some("Images/photo.png"))
+        .await
+        .unwrap();
+    assert_eq!(photo_history.len(), 1);
+}
+
+#[tokio::test]
+async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let base = first.server_head.clone();
+
+    let device_a = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![upsert("Note.md", b"hello from A\n")],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a.status, SyncStatus::Ok);
+
+    let device_b = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base,
+                changes: vec![upsert("Note.md", b"hello from B\n")],
+                ..empty_sync(first.server_head)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_b.status, SyncStatus::Conflict);
+    assert_eq!(device_b.conflicts[0].path, "Note.md");
+    let conflict_text = file_text(&device_b.files, "Note.md");
+    assert!(conflict_text.contains("<<<<<<< server"));
+    assert!(conflict_text.contains(">>>>>>> client"));
+
+    let repo = fixture
+        .root
+        .path()
+        .join("data/users/alice/vaults/notes/repo");
+    let status = git(Some(&repo), &["status", "--porcelain"], &[0])
+        .await
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "server repo should be clean after returning conflict"
+    );
+
+    let resolved = service
+        .resolve(
+            USER,
+            VAULT,
+            ResolveRequest {
+                client_id: "device-b".to_string(),
+                device_name: "iPhone".to_string(),
+                files: vec![ResolvedFile {
+                    path: "Note.md".to_string(),
+                    content_base64: STANDARD.encode(b"resolved\n"),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, SyncStatus::Ok);
+    let clone = fixture.clone_remote("resolved-check").await;
+    assert_eq!(
+        fs::read_to_string(clone.join("Note.md")).await.unwrap(),
+        "resolved\n"
+    );
+}
+
+#[tokio::test]
+async fn detects_binary_conflicts_without_overwriting_client_file() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let base = first.server_head.clone();
+
+    let device_a = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![upsert("Images/photo.png", &[1, 1, 1])],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a.status, SyncStatus::Ok);
+
+    let device_b = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base,
+                changes: vec![upsert("Images/photo.png", &[2, 2, 2])],
+                ..empty_sync(first.server_head)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_b.status, SyncStatus::Conflict);
+    assert_eq!(device_b.conflicts[0].path, "Images/photo.png");
+    assert!(
+        device_b.files.is_empty(),
+        "binary conflict should not overwrite the mobile client's local binary"
+    );
+}
+
+struct GitFixture {
+    root: TempDir,
+    remote: PathBuf,
+}
+
+impl GitFixture {
+    async fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let remote = root.path().join("remote.git");
+        git(
+            Some(root.path()),
+            &["init", "--bare", "--initial-branch=main", "remote.git"],
+            &[0],
+        )
+        .await
+        .unwrap();
+        Self { root, remote }
+    }
+
+    async fn seed_file(&self, path: &str, content: &[u8]) {
+        let seed = self.root.path().join("seed");
+        git(
+            Some(self.root.path()),
+            &["clone", self.remote.to_str().unwrap(), "seed"],
+            &[0],
+        )
+        .await
+        .unwrap();
+        git(Some(&seed), &["config", "user.name", "Test User"], &[0])
+            .await
+            .unwrap();
+        git(
+            Some(&seed),
+            &["config", "user.email", "test@example.invalid"],
+            &[0],
+        )
+        .await
+        .unwrap();
+        let absolute = seed.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).await.unwrap();
+        }
+        fs::write(&absolute, content).await.unwrap();
+        git(Some(&seed), &["add", "-A"], &[0]).await.unwrap();
+        git(Some(&seed), &["commit", "-m", "seed"], &[0])
+            .await
+            .unwrap();
+        git(Some(&seed), &["push", "-u", "origin", "main"], &[0])
+            .await
+            .unwrap();
+    }
+
+    async fn clone_remote(&self, name: &str) -> PathBuf {
+        git(
+            Some(self.root.path()),
+            &["clone", self.remote.to_str().unwrap(), name],
+            &[0],
+        )
+        .await
+        .unwrap();
+        self.root.path().join(name)
+    }
+
+    async fn commit_remote_file(
+        &self,
+        clone_name: &str,
+        path: &str,
+        content: &[u8],
+        message: &str,
+    ) {
+        let clone = self.clone_remote(clone_name).await;
+        git(Some(&clone), &["config", "user.name", "Remote User"], &[0])
+            .await
+            .unwrap();
+        git(
+            Some(&clone),
+            &["config", "user.email", "remote@example.invalid"],
+            &[0],
+        )
+        .await
+        .unwrap();
+        let absolute = clone.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent).await.unwrap();
+        }
+        fs::write(absolute, content).await.unwrap();
+        git(Some(&clone), &["add", "-A"], &[0]).await.unwrap();
+        git(Some(&clone), &["commit", "-m", message], &[0])
+            .await
+            .unwrap();
+        git(Some(&clone), &["push"], &[0]).await.unwrap();
+    }
+}
+
+fn register_request(remote: &Path) -> RegisterRequest {
+    RegisterRequest {
+        remote_url: remote.to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        author_name: "Test User".to_string(),
+        author_email: "test@example.invalid".to_string(),
+    }
+}
+
+fn empty_sync(base_head: Option<String>) -> SyncRequest {
+    SyncRequest {
+        base_head,
+        client_id: "device".to_string(),
+        device_name: "iPhone".to_string(),
+        changes: vec![],
+        client_manifest: vec![],
+    }
+}
+
+fn upsert(path: &str, content: &[u8]) -> ClientChange {
+    ClientChange::Upsert {
+        path: path.to_string(),
+        content_base64: STANDARD.encode(content),
+        sha256: None,
+        mtime: Some(1),
+    }
+}
+
+fn file_text(files: &[obsidian_git_sync_server::protocol::ServerFileChange], path: &str) -> String {
+    for file in files {
+        if let obsidian_git_sync_server::protocol::ServerFileChange::Upsert {
+            path: file_path,
+            content_base64,
+            ..
+        } = file
+        {
+            if file_path == path {
+                return String::from_utf8(STANDARD.decode(content_base64).unwrap()).unwrap();
+            }
+        }
+    }
+    panic!("file not found in response: {path}");
+}
