@@ -213,6 +213,7 @@ export class FileHistoryView extends ItemView {
       button.style.borderRadius = "6px";
       button.style.background = this.selectedHash === entry.hash ? "var(--background-modifier-hover)" : "transparent";
       button.style.cursor = "pointer";
+      button.style.display = "block";
       button.style.width = "100%";
 
       const row = button.createDiv();
@@ -220,8 +221,10 @@ export class FileHistoryView extends ItemView {
       row.style.gridTemplateColumns = "minmax(0, 1fr) minmax(80px, auto)";
       row.style.alignItems = "center";
       row.style.gap = "12px";
+      row.style.width = "100%";
       const dateEl = row.createEl("div", { text: formatDate(entry.date) });
       dateEl.style.fontWeight = "700";
+      dateEl.style.textAlign = "left";
       dateEl.style.overflow = "hidden";
       dateEl.style.textOverflow = "ellipsis";
       dateEl.style.whiteSpace = "nowrap";

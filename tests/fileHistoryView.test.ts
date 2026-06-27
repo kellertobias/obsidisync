@@ -59,7 +59,10 @@ test("file history view opens selected versions with the regular Obsidian file U
 test("file history list aligns date left and source device right", () => {
   const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
 
+  assert.match(viewSource, /button\.style\.display = "block"/);
   assert.match(viewSource, /row\.style\.gridTemplateColumns = "minmax\(0, 1fr\) minmax\(80px, auto\)"/);
+  assert.match(viewSource, /row\.style\.width = "100%"/);
   assert.match(viewSource, /dateEl\.style\.fontWeight = "700"/);
+  assert.match(viewSource, /dateEl\.style\.textAlign = "left"/);
   assert.match(viewSource, /deviceEl\.style\.textAlign = "right"/);
 });
