@@ -10,22 +10,39 @@ export interface CollectedVaultChanges {
   changes: ClientChange[];
 }
 
+export interface CollectChangesOptions {
+  stageUpload?: (path: string, buffer: ArrayBuffer, entry: ManifestEntry) => Promise<string>;
+}
+
 export class VaultState {
   constructor(private readonly vault: Vault) {}
 
-  async collectChanges(previousManifest: ManifestEntry[]): Promise<CollectedVaultChanges> {
+  async collectChanges(previousManifest: ManifestEntry[], options: CollectChangesOptions = {}): Promise<CollectedVaultChanges> {
     const manifest = await this.computeManifest();
     const diff = diffManifests(manifest, previousManifest.filter((entry) => !shouldIgnoreVaultPath(entry.path)));
     const changes: ClientChange[] = [];
 
     for (const path of diff.upsertPaths) {
       const buffer = await this.vault.adapter.readBinary(path);
+      const entry = manifest.find((manifestEntry) => manifestEntry.path === path);
+      if (!entry) continue;
+      if (options.stageUpload) {
+        const uploadId = await options.stageUpload(path, buffer, entry);
+        changes.push({
+          path,
+          op: "upsert",
+          uploadId,
+          sha256: entry.sha256,
+          mtime: entry.mtime
+        });
+        continue;
+      }
       changes.push({
         path,
         op: "upsert",
         contentBase64: arrayBufferToBase64(buffer),
-        sha256: manifest.find((entry) => entry.path === path)?.sha256,
-        mtime: manifest.find((entry) => entry.path === path)?.mtime
+        sha256: entry.sha256,
+        mtime: entry.mtime
       });
     }
 
@@ -87,7 +104,7 @@ export class VaultState {
   }
 }
 
-async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
+export async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

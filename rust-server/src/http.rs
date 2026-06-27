@@ -73,6 +73,15 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
         .route("/v1/auth/password/setup", post(setup_password))
         .route("/v1/auth/password/login", post(login_password))
         .route("/v1/users/:user/vaults/:vault/register", post(register))
+        .route("/v1/users/:user/vaults/:vault/uploads", post(init_upload))
+        .route(
+            "/v1/users/:user/vaults/:vault/uploads/:upload/chunk",
+            post(upload_chunk),
+        )
+        .route(
+            "/v1/users/:user/vaults/:vault/uploads/:upload/complete",
+            post(complete_upload),
+        )
         .route("/v1/users/:user/vaults/:vault/sync", post(sync))
         .route("/v1/users/:user/vaults/:vault/history", get(history))
         .route("/v1/users/:user/vaults/:vault/file", get(file_at_version))
@@ -303,6 +312,44 @@ async fn sync(
 ) -> Result<Json<SyncResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
     Ok(Json(state.vaults.sync(&user, &vault, request).await?))
+}
+
+async fn init_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Json(request): Json<UploadInitRequest>,
+) -> Result<Json<UploadInitResponse>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(
+        state.vaults.init_upload(&user, &vault, request).await?,
+    ))
+}
+
+async fn upload_chunk(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault, upload)): Path<(String, String, String)>,
+    Json(request): Json<UploadChunkRequest>,
+) -> Result<Json<UploadChunkResponse>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(
+        state
+            .vaults
+            .append_upload_chunk(&user, &vault, &upload, request)
+            .await?,
+    ))
+}
+
+async fn complete_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault, upload)): Path<(String, String, String)>,
+) -> Result<Json<UploadCompleteResponse>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(
+        state.vaults.complete_upload(&user, &vault, &upload).await?,
+    ))
 }
 
 async fn history(

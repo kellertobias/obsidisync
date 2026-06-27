@@ -7,7 +7,8 @@ use obsidian_git_sync_server::git::git;
 use obsidian_git_sync_server::http::{router, AppState};
 use obsidian_git_sync_server::paths::{is_text_or_code_path, validate_vault_path};
 use obsidian_git_sync_server::protocol::{
-    ClientChange, RegisterRequest, ResolveRequest, ResolvedFile, SyncRequest, SyncStatus,
+    ClientChange, ManifestEntry, RegisterRequest, ResolveRequest, ResolvedFile, SyncRequest,
+    SyncStatus, UploadChunkRequest, UploadInitRequest,
 };
 use obsidian_git_sync_server::vault::VaultService;
 use serde_json::Value;
@@ -54,11 +55,13 @@ fn protocol_matches_plugin_json_field_names() {
         ClientChange::Upsert {
             path,
             content_base64,
+            upload_id,
             sha256,
             mtime,
         } => {
             assert_eq!(path, "Note.md");
-            assert_eq!(content_base64, "aGVsbG8=");
+            assert_eq!(content_base64.as_deref(), Some("aGVsbG8="));
+            assert_eq!(upload_id, None);
             assert_eq!(sha256.as_deref(), Some("abc"));
             assert_eq!(mtime, Some(123));
         }
@@ -385,6 +388,97 @@ async fn syncs_without_remote_using_persistent_server_local_repo() {
 }
 
 #[tokio::test]
+async fn syncs_upserts_from_chunked_uploads() {
+    let root = tempfile::tempdir().unwrap();
+    let service = VaultService::new(root.path().join("data"));
+    service
+        .register(USER, VAULT, local_register_request())
+        .await
+        .unwrap();
+
+    let content = b"hello from chunked upload\n";
+    let init = service
+        .init_upload(
+            USER,
+            VAULT,
+            UploadInitRequest {
+                path: "Chunked.md".to_string(),
+                sha256: obsidian_git_sync_server::binary_store::sha256_hex(content),
+                size: content.len() as u64,
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .append_upload_chunk(
+            USER,
+            VAULT,
+            &init.upload_id,
+            UploadChunkRequest {
+                offset: 0,
+                content_base64: STANDARD.encode(&content[..8]),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .append_upload_chunk(
+            USER,
+            VAULT,
+            &init.upload_id,
+            UploadChunkRequest {
+                offset: 8,
+                content_base64: STANDARD.encode(&content[8..]),
+            },
+        )
+        .await
+        .unwrap();
+    let complete = service
+        .complete_upload(USER, VAULT, &init.upload_id)
+        .await
+        .unwrap();
+    assert_eq!(complete.size, content.len() as u64);
+
+    let synced = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                changes: vec![ClientChange::Upsert {
+                    path: "Chunked.md".to_string(),
+                    content_base64: None,
+                    upload_id: Some(init.upload_id.clone()),
+                    sha256: Some(complete.sha256),
+                    mtime: Some(1),
+                }],
+                client_manifest: vec![ManifestEntry {
+                    path: "Chunked.md".to_string(),
+                    sha256: obsidian_git_sync_server::binary_store::sha256_hex(content),
+                    mtime: 1,
+                    size: content.len() as u64,
+                }],
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(synced.status, SyncStatus::Ok);
+    assert!(
+        synced.files.is_empty(),
+        "sync should not echo files the client already uploaded"
+    );
+
+    let repo = root.path().join("data/users/alice/vaults/notes/repo");
+    assert_eq!(fs::read(repo.join("Chunked.md")).await.unwrap(), content);
+    assert!(fs::metadata(root.path().join(format!(
+        "data/users/alice/vaults/notes/uploads/{}.bin",
+        init.upload_id
+    )))
+    .await
+    .is_err());
+}
+
+#[tokio::test]
 async fn syncs_text_history_and_read_only_file_versions() {
     let fixture = GitFixture::new().await;
     fixture.seed_file("Note.md", b"hello\n").await;
@@ -622,7 +716,8 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
                 device_name: "iPhone".to_string(),
                 files: vec![ResolvedFile {
                     path: "Note.md".to_string(),
-                    content_base64: STANDARD.encode(b"resolved\n"),
+                    content_base64: Some(STANDARD.encode(b"resolved\n")),
+                    upload_id: None,
                 }],
             },
         )
@@ -807,7 +902,8 @@ fn empty_sync(base_head: Option<String>) -> SyncRequest {
 fn upsert(path: &str, content: &[u8]) -> ClientChange {
     ClientChange::Upsert {
         path: path.to_string(),
-        content_base64: STANDARD.encode(content),
+        content_base64: Some(STANDARD.encode(content)),
+        upload_id: None,
         sha256: None,
         mtime: Some(1),
     }

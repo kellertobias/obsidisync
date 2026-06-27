@@ -15,7 +15,8 @@ pub enum ClientChange {
     #[serde(rename = "upsert")]
     Upsert {
         path: String,
-        content_base64: String,
+        content_base64: Option<String>,
+        upload_id: Option<String>,
         sha256: Option<String>,
         mtime: Option<i64>,
     },
@@ -82,6 +83,43 @@ pub struct SyncResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct UploadInitRequest {
+    pub path: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadInitResponse {
+    pub upload_id: String,
+    pub chunk_size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadChunkRequest {
+    pub offset: u64,
+    pub content_base64: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadChunkResponse {
+    pub upload_id: String,
+    pub received: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadCompleteResponse {
+    pub upload_id: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub enum SyncStatus {
     Ok,
     Conflict,
@@ -99,7 +137,8 @@ pub struct ResolveRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedFile {
     pub path: String,
-    pub content_base64: String,
+    pub content_base64: Option<String>,
+    pub upload_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

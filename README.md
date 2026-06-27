@@ -18,6 +18,7 @@ The Rust server validates the bearer token, authorizes the `{user}` namespace, c
 - Text/code files are stored and versioned directly in Git.
 - Binary files such as images/audio are stored as plain object files under the server vault directory.
 - Binary metadata is committed to Git in `.obsidian-git-sync/binary-manifest.json`.
+- Changed file contents are uploaded to the server in bounded chunks before sync; the final sync request references staged upload IDs instead of embedding large base64 payloads.
 - If no Git remote URL is configured, the server keeps a normal local Git repository under the data directory and never fetches or pushes.
 - This keeps Git useful for actual text/code version storage while avoiding binary blobs in Git history.
 
@@ -26,6 +27,7 @@ Server layout:
 ```text
 data/users/{user}/vaults/{vault}/repo
 data/users/{user}/vaults/{vault}/binary
+data/users/{user}/vaults/{vault}/uploads
 data/users/{user}/vaults/{vault}/state.json
 ```
 
@@ -163,6 +165,9 @@ If a conflict remains, the plugin receives conflict-marker content and writes it
 ## API
 
 - `POST /v1/users/{user}/vaults/{vault}/register`
+- `POST /v1/users/{user}/vaults/{vault}/uploads`
+- `POST /v1/users/{user}/vaults/{vault}/uploads/{upload}/chunk`
+- `POST /v1/users/{user}/vaults/{vault}/uploads/{upload}/complete`
 - `POST /v1/users/{user}/vaults/{vault}/sync`
 - `GET /v1/users/{user}/vaults/{vault}/history?path=Note.md`
 - `GET /v1/users/{user}/vaults/{vault}/file?path=Note.md&hash=<commit>`

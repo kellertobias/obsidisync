@@ -11,7 +11,8 @@ export type ClientChange =
   | {
       path: string;
       op: "upsert";
-      contentBase64: string;
+      contentBase64?: string;
+      uploadId?: string;
       sha256?: string;
       mtime?: number;
     }
@@ -66,12 +67,40 @@ export interface SyncResponse {
   conflicts: SyncConflict[];
 }
 
+export interface UploadInitRequest {
+  path: string;
+  sha256: string;
+  size: number;
+}
+
+export interface UploadInitResponse {
+  uploadId: string;
+  chunkSize: number;
+}
+
+export interface UploadChunkRequest {
+  offset: number;
+  contentBase64: string;
+}
+
+export interface UploadChunkResponse {
+  uploadId: string;
+  received: number;
+}
+
+export interface UploadCompleteResponse {
+  uploadId: string;
+  size: number;
+  sha256: string;
+}
+
 export interface ResolveRequest {
   clientId: string;
   deviceName: string;
   files: Array<{
     path: string;
-    contentBase64: string;
+    contentBase64?: string;
+    uploadId?: string;
   }>;
 }
 

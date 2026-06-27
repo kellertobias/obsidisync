@@ -7,12 +7,17 @@ import {
   ResolveRequest,
   SyncRequest,
   SyncResponse,
+  ManifestEntry,
+  UploadChunkResponse,
+  UploadCompleteResponse,
+  UploadInitRequest,
+  UploadInitResponse,
   VersionFileResponse
 } from "./protocol";
 import { getDeviceName } from "./runtime";
 import { IosGitSyncSettings } from "./settings";
 import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./security";
-import { VaultState } from "./vaultState";
+import { sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
 
@@ -56,7 +61,9 @@ export class GitService {
       await this.register();
 
       const vaultState = new VaultState(this.vault);
-      const { manifest, changes } = await vaultState.collectChanges(this.settings.localManifest);
+      const { manifest, changes } = await vaultState.collectChanges(this.settings.localManifest, {
+        stageUpload: (path, buffer, entry) => this.uploadBuffer(path, buffer, entry)
+      });
       const request: SyncRequest = {
         baseHead: this.settings.serverHead || null,
         clientId: this.settings.clientId,
@@ -96,10 +103,11 @@ export class GitService {
     await this.exclusive(async () => {
       this.requireConfigured();
       const buffer = await this.vault.adapter.readBinary(path);
+      const uploadId = await this.uploadBuffer(path, buffer);
       const request: ResolveRequest = {
         clientId: this.settings.clientId,
         deviceName: this.deviceName(),
-        files: [{ path, contentBase64: arrayBufferToBase64(buffer) }]
+        files: [{ path, uploadId }]
       };
       const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/resolve`, request);
       const vaultState = new VaultState(this.vault);
@@ -192,6 +200,32 @@ export class GitService {
     const response = await this.postJson<RegisterResponse>(`${this.vaultPath()}/register`, request);
     this.settings.branch = response.branch;
     await this.saveSettings();
+  }
+
+  private async uploadBuffer(path: string, buffer: ArrayBuffer, entry?: ManifestEntry): Promise<string> {
+    const sha256 = entry?.sha256 ?? (await sha256Hex(buffer));
+    const initRequest: UploadInitRequest = {
+      path,
+      sha256,
+      size: buffer.byteLength
+    };
+    const init = await this.postJson<UploadInitResponse>(`${this.vaultPath()}/uploads`, initRequest);
+    const chunkSize = Math.max(1, Math.min(init.chunkSize || 512 * 1024, 2 * 1024 * 1024));
+    let offset = 0;
+    while (offset < buffer.byteLength) {
+      const chunk = buffer.slice(offset, Math.min(offset + chunkSize, buffer.byteLength));
+      const response = await this.postJson<UploadChunkResponse>(`${this.vaultPath()}/uploads/${encodeURIComponent(init.uploadId)}/chunk`, {
+        offset,
+        contentBase64: arrayBufferToBase64(chunk)
+      });
+      offset = response.received;
+    }
+
+    const complete = await this.postJson<UploadCompleteResponse>(`${this.vaultPath()}/uploads/${encodeURIComponent(init.uploadId)}/complete`, {});
+    if (complete.sha256 !== sha256 || complete.size !== buffer.byteLength) {
+      throw new Error(`Upload verification failed for ${path}`);
+    }
+    return complete.uploadId;
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {

@@ -9,15 +9,19 @@ use crate::paths::{
 };
 use crate::protocol::*;
 use crate::remote::RemotePolicy;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+const UPLOAD_CHUNK_SIZE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct VaultService {
@@ -41,6 +45,16 @@ pub struct VaultState {
     pub branch: String,
     pub author_name: String,
     pub author_email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UploadState {
+    path: String,
+    sha256: String,
+    size: u64,
+    received: u64,
+    complete: bool,
 }
 
 impl VaultState {
@@ -109,6 +123,119 @@ impl VaultService {
         .await
     }
 
+    pub async fn init_upload(
+        &self,
+        user: &str,
+        vault: &str,
+        request: UploadInitRequest,
+    ) -> Result<UploadInitResponse> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        self.with_lock(&user, &vault, || async {
+            let path = validate_vault_path(&request.path)?;
+            let sha256 = validate_sha256_hex(&request.sha256)?;
+            if request.size > i64::MAX as u64 {
+                bail!("invalid upload size");
+            }
+
+            let upload_dir = self.upload_dir(&user, &vault);
+            fs::create_dir_all(&upload_dir).await?;
+            let upload_id = self.new_upload_id(&upload_dir).await?;
+            let state = UploadState {
+                path,
+                sha256,
+                size: request.size,
+                received: 0,
+                complete: false,
+            };
+            fs::write(self.upload_content_path(&user, &vault, &upload_id), []).await?;
+            self.write_upload_state(&user, &vault, &upload_id, &state)
+                .await?;
+            Ok(UploadInitResponse {
+                upload_id,
+                chunk_size: UPLOAD_CHUNK_SIZE_BYTES,
+            })
+        })
+        .await
+    }
+
+    pub async fn append_upload_chunk(
+        &self,
+        user: &str,
+        vault: &str,
+        upload_id: &str,
+        request: UploadChunkRequest,
+    ) -> Result<UploadChunkResponse> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let upload_id = validate_upload_id(upload_id)?;
+        self.with_lock(&user, &vault, || async {
+            let mut state = self.read_upload_state(&user, &vault, &upload_id).await?;
+            if state.complete {
+                bail!("upload is already complete");
+            }
+            if request.offset != state.received {
+                bail!("invalid upload offset");
+            }
+
+            let content = STANDARD.decode(request.content_base64.as_bytes())?;
+            if content.is_empty() {
+                bail!("invalid upload chunk");
+            }
+            let received = state
+                .received
+                .checked_add(content.len() as u64)
+                .ok_or_else(|| anyhow!("invalid upload size"))?;
+            if received > state.size {
+                bail!("upload exceeds declared size");
+            }
+
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(self.upload_content_path(&user, &vault, &upload_id))
+                .await?;
+            file.write_all(&content).await?;
+            state.received = received;
+            self.write_upload_state(&user, &vault, &upload_id, &state)
+                .await?;
+            Ok(UploadChunkResponse {
+                upload_id,
+                received,
+            })
+        })
+        .await
+    }
+
+    pub async fn complete_upload(
+        &self,
+        user: &str,
+        vault: &str,
+        upload_id: &str,
+    ) -> Result<UploadCompleteResponse> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let upload_id = validate_upload_id(upload_id)?;
+        self.with_lock(&user, &vault, || async {
+            let mut state = self.read_upload_state(&user, &vault, &upload_id).await?;
+            if state.received != state.size {
+                bail!("upload is incomplete");
+            }
+            let actual = sha256_file(&self.upload_content_path(&user, &vault, &upload_id)).await?;
+            if actual != state.sha256 {
+                bail!("upload checksum mismatch");
+            }
+            state.complete = true;
+            self.write_upload_state(&user, &vault, &upload_id, &state)
+                .await?;
+            Ok(UploadCompleteResponse {
+                upload_id,
+                size: state.size,
+                sha256: state.sha256,
+            })
+        })
+        .await
+    }
+
     pub async fn sync(
         &self,
         user: &str,
@@ -123,6 +250,7 @@ impl VaultService {
             let base_head = validate_optional_commit_id(request.base_head.as_deref())?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
+            let upload_root = self.upload_dir(&user, &vault);
             self.configure_git(&repo, &state).await?;
             if state.uses_remote() {
                 self.fetch(&repo).await?;
@@ -138,7 +266,13 @@ impl VaultService {
             }
 
             let conflicts = self
-                .apply_client_changes(&repo, &binary_root, base_head.as_deref(), &request.changes)
+                .apply_client_changes(
+                    &repo,
+                    &binary_root,
+                    &upload_root,
+                    base_head.as_deref(),
+                    &request.changes,
+                )
                 .await?;
             if !conflicts.is_empty() {
                 return self
@@ -173,7 +307,12 @@ impl VaultService {
                 status: SyncStatus::Ok,
                 server_head: self.head_from_repo(&repo).await?,
                 files: self
-                    .changed_files_since(&repo, &binary_root, base_head.as_deref())
+                    .changed_files_since(
+                        &repo,
+                        &binary_root,
+                        base_head.as_deref(),
+                        &request.client_manifest,
+                    )
                     .await?,
                 conflicts: vec![],
             })
@@ -293,9 +432,17 @@ impl VaultService {
             self.validate_remote_url(&state.remote_url)?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
+            let upload_root = self.upload_dir(&user, &vault);
             for file in request.files {
                 let safe = validate_vault_path(&file.path)?;
-                let content = STANDARD.decode(file.content_base64.as_bytes())?;
+                let content = self
+                    .content_from_inline_or_upload(
+                        &upload_root,
+                        &safe,
+                        file.content_base64.as_ref(),
+                        file.upload_id.as_ref(),
+                    )
+                    .await?;
                 if is_text_or_code_path(&safe) {
                     write_repo_file(&repo, &safe, &content).await?;
                 } else {
@@ -331,7 +478,9 @@ impl VaultService {
             Ok(SyncResponse {
                 status: SyncStatus::Ok,
                 server_head: self.head_from_repo(&repo).await?,
-                files: self.changed_files_since(&repo, &binary_root, None).await?,
+                files: self
+                    .changed_files_since(&repo, &binary_root, None, &[])
+                    .await?,
                 conflicts: vec![],
             })
         })
@@ -431,6 +580,7 @@ impl VaultService {
         &self,
         repo: &Path,
         binary_root: &Path,
+        upload_root: &Path,
         base_head: Option<&str>,
         changes: &[ClientChange],
     ) -> Result<Vec<SyncConflict>> {
@@ -472,11 +622,19 @@ impl VaultService {
                 ClientChange::Upsert {
                     path,
                     content_base64,
+                    upload_id,
                     mtime,
                     ..
                 } => {
                     let safe = validate_vault_path(path)?;
-                    let content = STANDARD.decode(content_base64.as_bytes())?;
+                    let content = self
+                        .content_from_inline_or_upload(
+                            upload_root,
+                            &safe,
+                            content_base64.as_ref(),
+                            upload_id.as_ref(),
+                        )
+                        .await?;
                     if is_text_or_code_path(&safe) {
                         if let Some(conflict) =
                             apply_text_upsert(repo, base_head, &safe, &content).await?
@@ -513,8 +671,13 @@ impl VaultService {
         repo: &Path,
         binary_root: &Path,
         base_head: Option<&str>,
+        client_manifest: &[ManifestEntry],
     ) -> Result<Vec<ServerFileChange>> {
         let mut files = Vec::new();
+        let client_manifest_by_path: HashMap<&str, &ManifestEntry> = client_manifest
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect();
         let text_paths = if let Some(base) = base_head {
             if self.valid_commit(repo, base).await? {
                 split_nul(
@@ -543,11 +706,24 @@ impl VaultService {
             }
             let absolute = repo_path(repo, &path)?;
             match fs::read(&absolute).await {
-                Ok(content) => files.push(ServerFileChange::Upsert {
-                    path,
-                    sha256: sha256_hex(&content),
-                    content_base64: STANDARD.encode(content),
-                }),
+                Ok(content) => {
+                    let sha256 = sha256_hex(&content);
+                    if base_head.is_none()
+                        && client_has_manifest_entry(
+                            &client_manifest_by_path,
+                            &path,
+                            &sha256,
+                            content.len() as u64,
+                        )
+                    {
+                        continue;
+                    }
+                    files.push(ServerFileChange::Upsert {
+                        path,
+                        sha256,
+                        content_base64: STANDARD.encode(content),
+                    })
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     files.push(ServerFileChange::Delete { path })
                 }
@@ -565,6 +741,16 @@ impl VaultService {
         };
         for (path, entry) in current_manifest.files.iter() {
             if previous_manifest.files.get(path) != Some(entry) {
+                if base_head.is_none()
+                    && client_has_manifest_entry(
+                        &client_manifest_by_path,
+                        path,
+                        &entry.sha256,
+                        entry.size,
+                    )
+                {
+                    continue;
+                }
                 let content = read_binary_object(binary_root, entry).await?;
                 files.push(ServerFileChange::Upsert {
                     path: path.clone(),
@@ -707,7 +893,7 @@ impl VaultService {
         {
             Ok(files) => files,
             Err(_) => {
-                self.changed_files_since(repo, binary_root, base_head)
+                self.changed_files_since(repo, binary_root, base_head, &[])
                     .await?
             }
         };
@@ -810,6 +996,81 @@ impl VaultService {
         self.vault_dir(user, vault).join("binary")
     }
 
+    fn upload_dir(&self, user: &str, vault: &str) -> PathBuf {
+        self.vault_dir(user, vault).join("uploads")
+    }
+
+    fn upload_state_path(&self, user: &str, vault: &str, upload_id: &str) -> PathBuf {
+        self.upload_dir(user, vault)
+            .join(format!("{upload_id}.json"))
+    }
+
+    fn upload_content_path(&self, user: &str, vault: &str, upload_id: &str) -> PathBuf {
+        self.upload_dir(user, vault)
+            .join(format!("{upload_id}.bin"))
+    }
+
+    async fn new_upload_id(&self, upload_dir: &Path) -> Result<String> {
+        for _ in 0..8 {
+            let upload_id = random_upload_id()?;
+            if fs::metadata(upload_dir.join(format!("{upload_id}.json")))
+                .await
+                .is_err()
+            {
+                return Ok(upload_id);
+            }
+        }
+        bail!("could not allocate upload id")
+    }
+
+    async fn read_upload_state(
+        &self,
+        user: &str,
+        vault: &str,
+        upload_id: &str,
+    ) -> Result<UploadState> {
+        let state: UploadState = serde_json::from_slice(
+            &fs::read(self.upload_state_path(user, vault, upload_id)).await?,
+        )?;
+        validate_vault_path(&state.path)?;
+        validate_sha256_hex(&state.sha256)?;
+        if state.received > state.size || state.size > i64::MAX as u64 {
+            bail!("invalid upload state");
+        }
+        Ok(state)
+    }
+
+    async fn write_upload_state(
+        &self,
+        user: &str,
+        vault: &str,
+        upload_id: &str,
+        state: &UploadState,
+    ) -> Result<()> {
+        validate_vault_path(&state.path)?;
+        validate_sha256_hex(&state.sha256)?;
+        fs::write(
+            self.upload_state_path(user, vault, upload_id),
+            serde_json::to_vec_pretty(state)?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn content_from_inline_or_upload(
+        &self,
+        upload_root: &Path,
+        path: &str,
+        content_base64: Option<&String>,
+        upload_id: Option<&String>,
+    ) -> Result<Vec<u8>> {
+        match (content_base64, upload_id) {
+            (Some(content_base64), None) => Ok(STANDARD.decode(content_base64.as_bytes())?),
+            (None, Some(upload_id)) => read_upload_content(upload_root, path, upload_id).await,
+            _ => bail!("upsert must include exactly one content source"),
+        }
+    }
+
     async fn with_lock<F, Fut, T>(&self, user: &str, vault: &str, operation: F) -> Result<T>
     where
         F: FnOnce() -> Fut,
@@ -826,6 +1087,83 @@ impl VaultService {
         let _guard = lock.lock().await;
         operation().await
     }
+}
+
+fn validate_sha256_hex(value: &str) -> Result<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.len() != 64 || !value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid upload checksum");
+    }
+    Ok(value)
+}
+
+fn validate_upload_id(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.len() != 32 || !value.as_bytes().iter().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("invalid upload id");
+    }
+    Ok(value.to_string())
+}
+
+fn random_upload_id() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow!("could not generate upload id: {error}"))?;
+    Ok(bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
+}
+
+fn client_has_manifest_entry(
+    client_manifest_by_path: &HashMap<&str, &ManifestEntry>,
+    path: &str,
+    sha256: &str,
+    size: u64,
+) -> bool {
+    client_manifest_by_path
+        .get(path)
+        .map(|entry| entry.sha256 == sha256 && entry.size == size)
+        .unwrap_or(false)
+}
+
+async fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+async fn read_upload_content(
+    upload_root: &Path,
+    expected_path: &str,
+    upload_id: &str,
+) -> Result<Vec<u8>> {
+    let upload_id = validate_upload_id(upload_id)?;
+    let state_path = upload_root.join(format!("{upload_id}.json"));
+    let content_path = upload_root.join(format!("{upload_id}.bin"));
+    let state: UploadState = serde_json::from_slice(&fs::read(&state_path).await?)?;
+    if !state.complete {
+        bail!("upload is not complete");
+    }
+    if validate_vault_path(&state.path)? != expected_path {
+        bail!("upload path mismatch");
+    }
+    let expected_sha = validate_sha256_hex(&state.sha256)?;
+    let content = fs::read(&content_path).await?;
+    if content.len() as u64 != state.size || sha256_hex(&content) != expected_sha {
+        bail!("upload checksum mismatch");
+    }
+    let _ = fs::remove_file(&state_path).await;
+    let _ = fs::remove_file(&content_path).await;
+    Ok(content)
 }
 
 async fn apply_text_upsert(
