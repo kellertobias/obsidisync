@@ -43,6 +43,12 @@ pub struct VaultState {
     pub author_email: String,
 }
 
+impl VaultState {
+    fn uses_remote(&self) -> bool {
+        !self.remote_url.trim().is_empty()
+    }
+}
+
 impl VaultService {
     pub fn new(data_dir: PathBuf) -> Self {
         Self::new_with_options(VaultServiceOptions {
@@ -78,12 +84,13 @@ impl VaultService {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         self.with_lock(&user, &vault, || async {
-            self.remote_policy.validate(&request.remote_url)?;
+            let remote_url = request.remote_url.trim().to_string();
+            self.validate_remote_url(&remote_url)?;
             let branch = validate_git_branch(&request.branch)?;
             let state = VaultState {
                 user: user.clone(),
                 vault: vault.clone(),
-                remote_url: request.remote_url.trim().to_string(),
+                remote_url,
                 branch: branch.clone(),
                 author_name: validate_git_identity(&request.author_name, "author name")?,
                 author_email: validate_git_identity(&request.author_email, "author email")?,
@@ -112,18 +119,22 @@ impl VaultService {
         let vault = validate_slug(vault, "vault")?;
         self.with_lock(&user, &vault, || async {
             let state = self.read_state(&user, &vault).await?;
-            self.remote_policy.validate(&state.remote_url)?;
+            self.validate_remote_url(&state.remote_url)?;
             let base_head = validate_optional_commit_id(request.base_head.as_deref())?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
             self.configure_git(&repo, &state).await?;
-            self.fetch(&repo).await?;
+            if state.uses_remote() {
+                self.fetch(&repo).await?;
+            }
             self.commit_all_if_changed(&repo, "sync: server pending")
                 .await?;
-            if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
-                return self
-                    .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
-                    .await;
+            if state.uses_remote() {
+                if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
+                    return self
+                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .await;
+                }
             }
 
             let conflicts = self
@@ -144,16 +155,18 @@ impl VaultService {
                 ),
             )
             .await?;
-            self.fetch(&repo).await?;
-            if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
-                return self
-                    .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
-                    .await;
-            }
-            if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
-                return self
-                    .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
-                    .await;
+            if state.uses_remote() {
+                self.fetch(&repo).await?;
+                if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
+                    return self
+                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .await;
+                }
+                if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
+                    return self
+                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .await;
+                }
             }
 
             Ok(SyncResponse {
@@ -277,7 +290,7 @@ impl VaultService {
         let vault = validate_slug(vault, "vault")?;
         self.with_lock(&user, &vault, || async {
             let state = self.read_state(&user, &vault).await?;
-            self.remote_policy.validate(&state.remote_url)?;
+            self.validate_remote_url(&state.remote_url)?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
             for file in request.files {
@@ -302,16 +315,18 @@ impl VaultService {
                 ),
             )
             .await?;
-            self.fetch(&repo).await?;
-            if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
-                return self
-                    .conflict_response(&repo, &binary_root, None, conflicts)
-                    .await;
-            }
-            if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
-                return self
-                    .conflict_response(&repo, &binary_root, None, conflicts)
-                    .await;
+            if state.uses_remote() {
+                self.fetch(&repo).await?;
+                if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
+                    return self
+                        .conflict_response(&repo, &binary_root, None, conflicts)
+                        .await;
+                }
+                if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
+                    return self
+                        .conflict_response(&repo, &binary_root, None, conflicts)
+                        .await;
+                }
             }
             Ok(SyncResponse {
                 status: SyncStatus::Ok,
@@ -324,26 +339,40 @@ impl VaultService {
     }
 
     async fn ensure_repo(&self, state: &VaultState) -> Result<()> {
-        self.remote_policy.validate(&state.remote_url)?;
+        self.validate_remote_url(&state.remote_url)?;
         validate_git_branch(&state.branch)?;
         let vault_dir = self.vault_dir(&state.user, &state.vault);
         let repo = self.repo_dir(&state.user, &state.vault);
         fs::create_dir_all(&vault_dir).await?;
         fs::create_dir_all(self.binary_dir(&state.user, &state.vault)).await?;
         if fs::metadata(repo.join(".git")).await.is_err() {
-            let _ = fs::remove_dir_all(&repo).await;
-            git(
-                Some(&vault_dir),
-                &["clone", &state.remote_url, "repo"],
-                &[0],
-            )
-            .await?;
+            if state.uses_remote() {
+                let _ = fs::remove_dir_all(&repo).await;
+                git(
+                    Some(&vault_dir),
+                    &["clone", &state.remote_url, "repo"],
+                    &[0],
+                )
+                .await?;
+            } else {
+                fs::create_dir_all(&repo).await?;
+                git(
+                    Some(&vault_dir),
+                    &["init", "-b", &state.branch, "repo"],
+                    &[0],
+                )
+                .await?;
+            }
         }
         self.configure_git(&repo, state).await?;
-        self.ensure_branch(&repo, &state.branch).await
+        if state.uses_remote() {
+            self.ensure_remote_branch(&repo, &state.branch).await
+        } else {
+            self.ensure_local_branch(&repo, &state.branch).await
+        }
     }
 
-    async fn ensure_branch(&self, repo: &Path, branch: &str) -> Result<()> {
+    async fn ensure_remote_branch(&self, repo: &Path, branch: &str) -> Result<()> {
         let branch = validate_git_branch(branch)?;
         let remote_branch = format!("origin/{branch}");
         self.fetch(repo).await?;
@@ -364,6 +393,38 @@ impl VaultService {
             git(Some(repo), &["checkout", "-B", branch.as_str()], &[0]).await?;
         }
         Ok(())
+    }
+
+    async fn ensure_local_branch(&self, repo: &Path, branch: &str) -> Result<()> {
+        let branch = validate_git_branch(branch)?;
+        let branch_ref = format!("refs/heads/{branch}");
+        let local = git(
+            Some(repo),
+            &["rev-parse", "--verify", &branch_ref],
+            &[0, 128],
+        )
+        .await?;
+        if local.code == 0 {
+            git(Some(repo), &["checkout", branch.as_str()], &[0]).await?;
+            return Ok(());
+        }
+
+        let head = git(Some(repo), &["rev-parse", "--verify", "HEAD"], &[0, 128]).await?;
+        if head.code == 0 {
+            git(Some(repo), &["checkout", "-b", branch.as_str()], &[0]).await?;
+        } else {
+            let branch_ref = format!("refs/heads/{branch}");
+            git(Some(repo), &["symbolic-ref", "HEAD", &branch_ref], &[0]).await?;
+        }
+        Ok(())
+    }
+
+    fn validate_remote_url(&self, remote_url: &str) -> Result<()> {
+        if remote_url.trim().is_empty() {
+            Ok(())
+        } else {
+            self.remote_policy.validate(remote_url)
+        }
     }
 
     async fn apply_client_changes(

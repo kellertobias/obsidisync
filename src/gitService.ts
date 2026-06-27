@@ -184,7 +184,7 @@ export class GitService {
 
   private async register(): Promise<void> {
     const request: RegisterRequest = {
-      remoteUrl: this.settings.remoteUrl,
+      remoteUrl: this.settings.remoteUrl.trim(),
       branch: this.settings.branch,
       authorName: this.settings.authorName,
       authorEmail: this.settings.authorEmail
@@ -278,14 +278,13 @@ export class GitService {
     if (!this.settings.oidcAccessToken) throw new Error("Set an access token before syncing");
     if (!this.settings.userSlug) throw new Error("Set a user namespace before syncing");
     if (!this.settings.vaultSlug) throw new Error("Set a vault namespace before syncing");
-    if (!this.settings.remoteUrl) throw new Error("Set a Git remote URL before registering this vault");
     if (!this.settings.branch) throw new Error("Set a branch before syncing");
     assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
     assertNamespaceSlug(this.settings.userSlug, "User namespace");
     assertNamespaceSlug(this.settings.vaultSlug, "Vault namespace");
     assertGitBranch(this.settings.branch);
     if (/\s/.test(this.settings.oidcAccessToken)) throw new Error("Access token must not contain whitespace");
-    if (this.settings.remoteUrl.length > 2048 || /[\s\0]/.test(this.settings.remoteUrl)) {
+    if (this.settings.remoteUrl && (this.settings.remoteUrl.length > 2048 || /[\s\0]/.test(this.settings.remoteUrl))) {
       throw new Error("Git remote URL is invalid");
     }
   }

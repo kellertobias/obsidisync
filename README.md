@@ -11,13 +11,14 @@ The device does not run Git. The plugin sends changed files to:
 /v1/users/{user}/vaults/{vault}
 ```
 
-The Rust server validates the bearer token, authorizes the `{user}` namespace, rebases and pushes Git history, and returns merged file changes. Tokens can come from OIDC or from the built-in single-user password mode.
+The Rust server validates the bearer token, authorizes the `{user}` namespace, commits Git history, optionally rebases and pushes to a configured remote, and returns merged file changes. Tokens can come from OIDC or from the built-in single-user password mode.
 
 ## Storage model
 
 - Text/code files are stored and versioned directly in Git.
 - Binary files such as images/audio are stored as plain object files under the server vault directory.
 - Binary metadata is committed to Git in `.obsidian-git-sync/binary-manifest.json`.
+- If no Git remote URL is configured, the server keeps a normal local Git repository under the data directory and never fetches or pushes.
 - This keeps Git useful for actual text/code version storage while avoiding binary blobs in Git history.
 
 Server layout:
@@ -72,7 +73,7 @@ Single-user password mode without SSO:
 export OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice"
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
 export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
-export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com"
+export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" # only needed when using network remotes
 npm run start:server
 ```
 
@@ -110,9 +111,10 @@ Security defaults:
 - OIDC issuer/JWKS URLs must use HTTPS, except localhost development URLs.
 - Password mode stores an Argon2 password hash and hashed access tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json`.
 - Plugin server/OIDC URLs must use HTTPS, except localhost development URLs.
+- Leaving the Git remote URL blank is allowed and selects server-local Git storage in `OBSIDIAN_GIT_SYNC_DATA_DIR`.
 - Git remotes must use HTTPS or SSH. Local paths and `file://` remotes are disabled unless `OBSIDIAN_GIT_SYNC_ALLOW_LOCAL_REMOTES=true`.
 - HTTPS remote URLs with embedded credentials are rejected so tokens are not written to `state.json`; configure server-side Git credentials or SSH keys instead.
-- Network remote hosts are default-deny. List each allowed Git host in `OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS`.
+- Network remote hosts are default-deny. List each allowed Git host in `OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS` when using a remote URL.
 - CORS headers are not emitted by default. Set `OBSIDIAN_GIT_SYNC_ALLOWED_ORIGINS` to exact origins if you intentionally call the API from a browser app.
 
 ## Plugin setup
@@ -131,12 +133,12 @@ Configure:
 - Access token from OIDC/device login or `/login` password mode
 - User namespace, e.g. `alice`
 - Vault namespace, e.g. `personal`
-- Git remote URL
+- Git remote URL, optional
 - Branch
 - Author name/email
 - Optional device name
 
-The Git remote URL is used only by the server. SSH works if the server's native Git/SSH environment is configured.
+The Git remote URL is used only by the server. Leave it blank to use only the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`. SSH works if the server's native Git/SSH environment is configured.
 
 ## Version UI
 
@@ -153,7 +155,7 @@ The version modal lists commits for the active file, previews selected versions 
 
 The server uses:
 
-- `git rebase origin/{branch}` for remote integration, preserving flat history.
+- `git rebase origin/{branch}` for remote integration when a remote URL is configured, preserving flat history.
 - `git merge-file` for server/client text conflicts before committing.
 
 If a conflict remains, the plugin receives conflict-marker content and writes it into the file. This works on mobile because the user resolves the file inside Obsidian, then runs **Resolve current conflict file** or syncs again.

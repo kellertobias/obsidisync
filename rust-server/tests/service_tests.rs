@@ -323,6 +323,68 @@ async fn production_service_rejects_local_git_remotes() {
 }
 
 #[tokio::test]
+async fn syncs_without_remote_using_persistent_server_local_repo() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let service = VaultService::new(data_dir.clone());
+
+    let registration = service
+        .register(USER, VAULT, local_register_request())
+        .await
+        .unwrap();
+    assert_eq!(registration.server_head, None);
+
+    let synced = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                changes: vec![upsert("Note.md", b"local only\n")],
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(synced.status, SyncStatus::Ok);
+    let head = synced.server_head.clone().unwrap();
+
+    let repo = data_dir.join("users/alice/vaults/notes/repo");
+    assert_eq!(
+        fs::read_to_string(repo.join("Note.md")).await.unwrap(),
+        "local only\n"
+    );
+    assert!(git(Some(&repo), &["remote"], &[0])
+        .await
+        .unwrap()
+        .stdout
+        .is_empty());
+
+    let restarted = VaultService::new(data_dir);
+    let registration_after_restart = restarted
+        .register(USER, VAULT, local_register_request())
+        .await
+        .unwrap();
+    assert_eq!(
+        registration_after_restart.server_head.as_deref(),
+        Some(head.as_str())
+    );
+
+    let history = restarted
+        .history(USER, VAULT, Some("Note.md"))
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    let version = restarted
+        .file_at_version(USER, VAULT, "Note.md", &head)
+        .await
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(STANDARD.decode(version.content_base64).unwrap()).unwrap(),
+        "local only\n"
+    );
+}
+
+#[tokio::test]
 async fn syncs_text_history_and_read_only_file_versions() {
     let fixture = GitFixture::new().await;
     fixture.seed_file("Note.md", b"hello\n").await;
@@ -717,6 +779,15 @@ impl GitFixture {
 fn register_request(remote: &Path) -> RegisterRequest {
     RegisterRequest {
         remote_url: remote.to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        author_name: "Test User".to_string(),
+        author_email: "test@example.invalid".to_string(),
+    }
+}
+
+fn local_register_request() -> RegisterRequest {
+    RegisterRequest {
+        remote_url: "".to_string(),
         branch: "main".to_string(),
         author_name: "Test User".to_string(),
         author_email: "test@example.invalid".to_string(),

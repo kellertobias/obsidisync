@@ -141,10 +141,10 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Git remote URL")
-      .setDesc("Remote used by the server. SSH is supported only on the server if its Git environment is configured for it.")
+      .setDesc("Optional. Leave blank to keep a server-local Git repository in the server data directory.")
       .addText((text) =>
         text
-          .setPlaceholder("git@github.com:user/private-vault.git")
+          .setPlaceholder("optional")
           .setValue(this.plugin.settings.remoteUrl)
           .onChange(async (value) => {
             this.plugin.settings.remoteUrl = value.trim();
