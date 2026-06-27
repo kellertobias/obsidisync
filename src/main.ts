@@ -1,4 +1,5 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
+import { ComputerNameModal } from "./computerNameModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
@@ -29,6 +30,16 @@ export default class ObsyncPlugin extends Plugin {
       id: "sync-now",
       name: "Sync now",
       callback: () => this.runCommand(() => this.gitService.sync())
+    });
+
+    this.addCommand({
+      id: "set-computer-name",
+      name: "Set computer name",
+      callback: () =>
+        new ComputerNameModal(this.app, this.settings.deviceName, async (name) => {
+          this.settings.deviceName = name;
+          await this.saveSettings();
+        }).open()
     });
 
     this.addCommand({

@@ -180,10 +180,10 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Device name")
-      .setDesc("Used in Git commit messages created by the server.")
+      .setName("Computer name")
+      .setDesc("Shown as the source computer in sync history. Set a different name on each computer.")
       .addText((text) =>
-        text.setPlaceholder("Keller iPhone").setValue(this.plugin.settings.deviceName).onChange(async (value) => {
+        text.setPlaceholder("Keller MacBook").setValue(this.plugin.settings.deviceName).onChange(async (value) => {
           this.plugin.settings.deviceName = value.trim();
           await this.plugin.saveSettings();
         })
