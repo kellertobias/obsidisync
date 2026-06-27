@@ -55,6 +55,10 @@ export class GitService {
     this.settings = settings;
   }
 
+  currentDeviceName(): string {
+    return this.deviceName();
+  }
+
   async sync(): Promise<void> {
     await this.exclusive(async () => {
       this.requireConfigured();

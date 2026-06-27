@@ -109,6 +109,7 @@ export interface HistoryEntry {
   date: string;
   author: string;
   subject: string;
+  deviceName?: string | null;
 }
 
 export interface VersionFileResponse {

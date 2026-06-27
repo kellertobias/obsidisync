@@ -108,6 +108,7 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   private async openFileHistoryView(): Promise<void> {
+    const activeFilePath = this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ?? null;
     let leaf = this.app.workspace.getLeavesOfType(FILE_HISTORY_VIEW_TYPE)[0];
     if (!leaf) {
       leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
@@ -116,7 +117,11 @@ export default class ObsyncPlugin extends Plugin {
     await this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (view instanceof FileHistoryView) {
-      await view.refreshCurrentFile();
+      if (activeFilePath) {
+        await view.showFile(activeFilePath);
+      } else {
+        await view.refresh();
+      }
     }
   }
 
