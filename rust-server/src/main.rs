@@ -56,6 +56,8 @@ impl RuntimeConfig {
             let user =
                 std::env::var("OBSIDIAN_GIT_SYNC_DEV_USER").unwrap_or_else(|_| "dev".to_string());
             AuthVerifier::StaticTokenForDev { token, user }
+        } else if let Some(user) = password_user_env() {
+            AuthVerifier::password(user, data_dir.clone())?
         } else {
             let issuer = required_env("OIDC_ISSUER")?;
             let audience = required_env("OIDC_AUDIENCE")?;
@@ -84,10 +86,18 @@ impl RuntimeConfig {
     }
 }
 
+fn password_user_env() -> Option<String> {
+    std::env::var("OBSIDIAN_GIT_SYNC_PASSWORD_USER")
+        .or_else(|_| std::env::var("OBSIDIAN_GIT_SYNC_USER"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn required_env(name: &str) -> Result<String> {
     match std::env::var(name) {
         Ok(value) if !value.is_empty() => Ok(value),
-        _ => bail!("{name} is required unless OBSIDIAN_GIT_SYNC_DEV_TOKEN is set"),
+        _ => bail!("{name} is required unless OBSIDIAN_GIT_SYNC_DEV_TOKEN or OBSIDIAN_GIT_SYNC_PASSWORD_USER is set"),
     }
 }
 

@@ -275,7 +275,7 @@ export class GitService {
 
   private requireConfigured(): void {
     if (!this.settings.serverUrl) throw new Error("Set a sync server URL before syncing");
-    if (!this.settings.oidcAccessToken) throw new Error("Set an OIDC access token before syncing");
+    if (!this.settings.oidcAccessToken) throw new Error("Set an access token before syncing");
     if (!this.settings.userSlug) throw new Error("Set a user namespace before syncing");
     if (!this.settings.vaultSlug) throw new Error("Set a vault namespace before syncing");
     if (!this.settings.remoteUrl) throw new Error("Set a Git remote URL before registering this vault");
@@ -284,7 +284,7 @@ export class GitService {
     assertNamespaceSlug(this.settings.userSlug, "User namespace");
     assertNamespaceSlug(this.settings.vaultSlug, "Vault namespace");
     assertGitBranch(this.settings.branch);
-    if (/\s/.test(this.settings.oidcAccessToken)) throw new Error("OIDC access token must not contain whitespace");
+    if (/\s/.test(this.settings.oidcAccessToken)) throw new Error("Access token must not contain whitespace");
     if (this.settings.remoteUrl.length > 2048 || /[\s\0]/.test(this.settings.remoteUrl)) {
       throw new Error("Git remote URL is invalid");
     }

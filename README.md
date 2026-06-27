@@ -11,7 +11,7 @@ The device does not run Git. The plugin sends changed files to:
 /v1/users/{user}/vaults/{vault}
 ```
 
-The Rust server validates the OIDC bearer token, authorizes the `{user}` namespace, rebases and pushes Git history, and returns merged file changes.
+The Rust server validates the bearer token, authorizes the `{user}` namespace, rebases and pushes Git history, and returns merged file changes. Tokens can come from OIDC or from the built-in single-user password mode.
 
 ## Storage model
 
@@ -66,6 +66,18 @@ export OBSIDIAN_GIT_SYNC_ALLOWED_ORIGINS="" # default: no browser CORS headers
 npm run start:server
 ```
 
+Single-user password mode without SSO:
+
+```bash
+export OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice"
+export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
+export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
+export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com"
+npm run start:server
+```
+
+Then open `/login` on the server, enter the configured username, and set the password. The page returns an access token. Paste that token into the Obsidian plugin access token field. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
+
 Local development token mode:
 
 ```bash
@@ -96,6 +108,7 @@ The container listens on `0.0.0.0:8787` and stores server state in `/data`.
 Security defaults:
 
 - OIDC issuer/JWKS URLs must use HTTPS, except localhost development URLs.
+- Password mode stores an Argon2 password hash and hashed access tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json`.
 - Plugin server/OIDC URLs must use HTTPS, except localhost development URLs.
 - Git remotes must use HTTPS or SSH. Local paths and `file://` remotes are disabled unless `OBSIDIAN_GIT_SYNC_ALLOW_LOCAL_REMOTES=true`.
 - HTTPS remote URLs with embedded credentials are rejected so tokens are not written to `state.json`; configure server-side Git credentials or SSH keys instead.
@@ -114,8 +127,8 @@ Install:
 Configure:
 
 - Sync server URL
-- OIDC issuer, client ID, scope, and optional audience
-- OIDC access token, or use **Start OIDC device login**
+- OIDC issuer, client ID, scope, and optional audience when using OIDC
+- Access token from OIDC/device login or `/login` password mode
 - User namespace, e.g. `alice`
 - Vault namespace, e.g. `personal`
 - Git remote URL
@@ -159,4 +172,4 @@ If a conflict remains, the plugin receives conflict-marker content and writes it
 - End-to-end encrypted content is out of scope for v1 because it prevents server-side text merges.
 - OIDC device login is implemented; automatic refresh-token storage is not implemented yet.
 - Binary file version retrieval depends on the server object store retaining the hash referenced by Git metadata.
-- The plugin stores the OIDC access token in Obsidian plugin data. Use short-lived access tokens; refresh-token storage is intentionally not implemented.
+- The plugin stores the access token in Obsidian plugin data. Use short-lived OIDC access tokens when using OIDC; refresh-token storage is intentionally not implemented. Password mode tokens can be rotated by deleting `auth/password.json` or resetting the password data directory.

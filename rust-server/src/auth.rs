@@ -1,3 +1,4 @@
+use crate::password_auth::{PasswordAuth, PasswordAuthSession};
 use anyhow::{anyhow, bail, Result};
 use axum::http::HeaderMap;
 use jsonwebtoken::jwk::JwkSet;
@@ -5,6 +6,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -19,6 +21,7 @@ pub struct AuthContext {
 #[derive(Clone)]
 pub enum AuthVerifier {
     Oidc(Arc<OidcVerifier>),
+    Password(Arc<PasswordAuth>),
     StaticTokenForDev { token: String, user: String },
 }
 
@@ -82,6 +85,42 @@ impl AuthVerifier {
         })))
     }
 
+    pub fn password(user: String, data_dir: impl Into<PathBuf>) -> Result<Self> {
+        Ok(Self::Password(Arc::new(PasswordAuth::new(
+            user,
+            data_dir.into(),
+        )?)))
+    }
+
+    pub async fn password_is_configured(&self) -> Result<bool> {
+        match self {
+            AuthVerifier::Password(verifier) => verifier.is_configured().await,
+            _ => bail!("password login is not enabled"),
+        }
+    }
+
+    pub async fn setup_password(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<PasswordAuthSession> {
+        match self {
+            AuthVerifier::Password(verifier) => verifier.setup_password(username, password).await,
+            _ => bail!("password login is not enabled"),
+        }
+    }
+
+    pub async fn login_password(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<PasswordAuthSession> {
+        match self {
+            AuthVerifier::Password(verifier) => verifier.login(username, password).await,
+            _ => bail!("password login is not enabled"),
+        }
+    }
+
     pub async fn verify_headers(&self, headers: &HeaderMap) -> Result<AuthContext> {
         let header = headers
             .get("authorization")
@@ -93,6 +132,13 @@ impl AuthVerifier {
 
         match self {
             AuthVerifier::Oidc(verifier) => verifier.verify_token(token).await,
+            AuthVerifier::Password(verifier) => {
+                let user = verifier.verify_token(token).await?;
+                Ok(AuthContext {
+                    subject: user.clone(),
+                    user,
+                })
+            }
             AuthVerifier::StaticTokenForDev {
                 token: expected,
                 user,
@@ -303,6 +349,38 @@ mod tests {
         assert!(!allowed.contains(&Algorithm::HS256));
         assert!(allowed.contains(&Algorithm::RS256));
         assert!(allowed.contains(&Algorithm::EdDSA));
+    }
+
+    #[tokio::test]
+    async fn password_auth_sets_password_and_verifies_bearer_tokens() {
+        let root = tempfile::tempdir().unwrap();
+        let verifier =
+            AuthVerifier::password("Alice@example.com".to_string(), root.path()).unwrap();
+
+        assert!(!verifier.password_is_configured().await.unwrap());
+        let session = verifier
+            .setup_password("alice", "correct horse battery staple")
+            .await
+            .unwrap();
+        assert_eq!(session.user, "alice");
+        assert!(verifier.password_is_configured().await.unwrap());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Bearer {}", session.access_token).parse().unwrap(),
+        );
+        let auth = verifier.verify_headers(&headers).await.unwrap();
+        assert_eq!(auth.user, "alice");
+
+        assert!(verifier
+            .login_password("alice", "wrong password")
+            .await
+            .is_err());
+        assert!(verifier
+            .setup_password("alice", "another correct password")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

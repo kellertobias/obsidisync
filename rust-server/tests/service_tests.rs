@@ -1,5 +1,5 @@
-use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::body::{to_bytes, Body};
+use axum::http::{header, Request, Response, StatusCode};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use obsidian_git_sync_server::auth::{normalize_user_claim, AuthVerifier};
@@ -10,6 +10,7 @@ use obsidian_git_sync_server::protocol::{
     ClientChange, RegisterRequest, ResolveRequest, ResolvedFile, SyncRequest, SyncStatus,
 };
 use obsidian_git_sync_server::vault::VaultService;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use tokio::fs;
@@ -112,6 +113,130 @@ async fn http_authorization_rejects_cross_user_access() {
                 .method("POST")
                 .uri("/v1/users/bob/vaults/personal/register")
                 .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&register_request(Path::new("/tmp/remote.git"))).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_user.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn password_auth_page_setup_login_and_authorizes_api_requests() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let app = router(
+        AppState {
+            vaults: VaultService::new(data_dir.clone()),
+            auth: AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let setup_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup_page.status(), StatusCode::OK);
+    assert!(response_text(setup_page).await.contains("Set password"));
+
+    let setup_form = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=alice&password=correct-horse-battery-staple&password_confirm=correct-horse-battery-staple",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup_form.status(), StatusCode::OK);
+    let setup_html = response_text(setup_form).await;
+    assert!(setup_html.contains("Access token"), "{setup_html}");
+    assert!(setup_html.contains("textarea"));
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "correct-horse-battery-staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let login_body = response_json(login).await;
+    assert_eq!(login_body["user"], "alice");
+    let token = login_body["accessToken"].as_str().unwrap();
+    assert!(!token.is_empty());
+
+    let wrong_password = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "wrong-password"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wrong_password.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/personal/register")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&register_request(Path::new("/tmp/remote.git"))).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::BAD_REQUEST);
+
+    let wrong_user = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/bob/vaults/personal/register")
+                .header("authorization", format!("Bearer {token}"))
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_string(&register_request(Path::new("/tmp/remote.git"))).unwrap(),
@@ -615,6 +740,16 @@ fn upsert(path: &str, content: &[u8]) -> ClientChange {
         sha256: None,
         mtime: Some(1),
     }
+}
+
+async fn response_text(response: Response<Body>) -> String {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+async fn response_json(response: Response<Body>) -> Value {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 fn file_text(files: &[obsidian_git_sync_server::protocol::ServerFileChange], path: &str) -> String {

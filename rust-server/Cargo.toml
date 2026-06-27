@@ -5,8 +5,10 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.7"
 base64 = "0.22"
+getrandom = "0.3"
 jsonwebtoken = "9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

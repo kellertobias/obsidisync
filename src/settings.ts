@@ -70,8 +70,8 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("OIDC access token")
-      .setDesc("Bearer access token issued by your OIDC provider. You can paste one or use the device login command.")
+      .setName("Access token")
+      .setDesc("Bearer token from OIDC/device login or the server password login page.")
       .addText((text) => {
         text.inputEl.type = "password";
         text.setValue(this.plugin.settings.oidcAccessToken).onChange(async (value) => {
