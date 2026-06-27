@@ -1,3 +1,5 @@
+export const HISTORY_SNAPSHOT_DIR = "Obsync History";
+
 export function shouldIgnoreVaultPath(path: string): boolean {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
   return (
@@ -5,6 +7,8 @@ export function shouldIgnoreVaultPath(path: string): boolean {
     normalized.startsWith(".git/") ||
     normalized === ".obsidian-git-sync" ||
     normalized.startsWith(".obsidian-git-sync/") ||
+    normalized === HISTORY_SNAPSHOT_DIR ||
+    normalized.startsWith(`${HISTORY_SNAPSHOT_DIR}/`) ||
     normalized === ".trash" ||
     normalized.startsWith(".trash/") ||
     normalized === ".obsidian/workspace.json" ||

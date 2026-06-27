@@ -1,11 +1,11 @@
 import { ItemView, MarkdownView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { base64ToArrayBuffer } from "./base64";
 import { GitService } from "./gitService";
+import { HISTORY_SNAPSHOT_DIR } from "./ignore";
 import { HistoryEntry } from "./protocol";
 import { sha256Hex } from "./vaultState";
 
 export const FILE_HISTORY_VIEW_TYPE = "obsync-file-history";
-const HISTORY_SNAPSHOT_DIR = ".obsidian-git-sync/history";
 
 type SyncState = "up-to-date" | "local-changes" | "server-newer" | "not-synced" | "unknown";
 
@@ -272,13 +272,20 @@ export class FileHistoryView extends ItemView {
 
   private async writeVersionSnapshot(entry: HistoryEntry, content: ArrayBuffer): Promise<TFile> {
     await this.ensureSnapshotFolder();
-    const path = snapshotPath(this.filePath ?? "version", entry);
-    const existing = this.app.vault.getAbstractFileByPath(path);
-    if (existing instanceof TFile) {
-      await this.app.vault.modifyBinary(existing, content);
-      return existing;
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const path = snapshotPath(this.filePath ?? "version", entry, attempt);
+      const existing = this.app.vault.getAbstractFileByPath(path);
+      if (existing instanceof TFile) {
+        await this.app.vault.modifyBinary(existing, content);
+        return existing;
+      }
+
+      if (await this.app.vault.adapter.exists(path, true)) continue;
+      return this.app.vault.createBinary(path, content);
     }
-    return this.app.vault.createBinary(path, content);
+
+    throw new Error("Could not create a unique history snapshot file");
   }
 
   private async ensureSnapshotFolder(): Promise<void> {
@@ -449,9 +456,10 @@ function formatDateFromMs(timestamp: number): string {
   return new Date(timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function snapshotPath(originalPath: string, entry: HistoryEntry): string {
+function snapshotPath(originalPath: string, entry: HistoryEntry, attempt = 0): string {
   const name = sanitizeSnapshotName(originalPath);
-  return `${HISTORY_SNAPSHOT_DIR}/${entry.hash.slice(0, 12)}-${name}`;
+  const suffix = attempt === 0 ? "" : `-${attempt + 1}`;
+  return `${HISTORY_SNAPSHOT_DIR}/${entry.hash.slice(0, 12)}${suffix}-${name}`;
 }
 
 function sanitizeSnapshotName(path: string): string {

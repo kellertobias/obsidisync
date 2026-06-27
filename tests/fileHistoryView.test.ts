@@ -42,9 +42,11 @@ test("file history view opens selected versions with the regular Obsidian file U
 
   assert.match(viewSource, /gitService\.history\(this\.filePath\)/);
   assert.match(viewSource, /gitService\.fileAtVersion\(this\.filePath, entry\.hash\)/);
-  assert.match(viewSource, /HISTORY_SNAPSHOT_DIR = "\.obsidian-git-sync\/history"/);
+  assert.match(viewSource, /HISTORY_SNAPSHOT_DIR/);
   assert.match(viewSource, /createBinary\(path, content\)/);
   assert.match(viewSource, /modifyBinary\(existing, content\)/);
+  assert.match(viewSource, /adapter\.exists\(path, true\)/);
+  assert.match(viewSource, /snapshotPath\(this\.filePath \?\? "version", entry, attempt\)/);
   assert.match(viewSource, /openFile\(snapshot/);
   assert.match(viewSource, /isHistorySnapshotPath/);
   assert.doesNotMatch(viewSource, /MarkdownRenderer\.render/);
