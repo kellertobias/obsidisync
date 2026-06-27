@@ -213,7 +213,10 @@ export class FileHistoryView extends ItemView {
       button.style.borderRadius = "6px";
       button.style.background = this.selectedHash === entry.hash ? "var(--background-modifier-hover)" : "transparent";
       button.style.cursor = "pointer";
-      button.style.display = "block";
+      button.style.display = "flex";
+      button.style.alignItems = "center";
+      button.style.justifyContent = "stretch";
+      button.style.minHeight = "38px";
       button.style.width = "100%";
 
       const row = button.createDiv();
@@ -221,14 +224,22 @@ export class FileHistoryView extends ItemView {
       row.style.gridTemplateColumns = "minmax(0, 1fr) minmax(80px, auto)";
       row.style.alignItems = "center";
       row.style.gap = "12px";
+      row.style.flex = "1 1 auto";
       row.style.width = "100%";
       const dateEl = row.createEl("div", { text: formatDate(entry.date) });
+      dateEl.style.display = "flex";
+      dateEl.style.alignItems = "center";
+      dateEl.style.justifyContent = "flex-start";
       dateEl.style.fontWeight = "700";
       dateEl.style.textAlign = "left";
       dateEl.style.overflow = "hidden";
       dateEl.style.textOverflow = "ellipsis";
       dateEl.style.whiteSpace = "nowrap";
       const deviceEl = row.createEl("div", { text: source.device });
+      deviceEl.style.display = "flex";
+      deviceEl.style.alignItems = "center";
+      deviceEl.style.justifyContent = "flex-end";
+      deviceEl.style.justifySelf = "end";
       deviceEl.style.fontSize = "12px";
       deviceEl.style.color = "var(--text-muted)";
       deviceEl.style.textAlign = "right";
