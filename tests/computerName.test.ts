@@ -35,7 +35,13 @@ test("settings persist local history snapshot references", () => {
   const settingsSource = readFileSync(join(root, "src", "settings.ts"), "utf8");
 
   assert.match(settingsSource, /historySnapshots: HistorySnapshotEntry\[\]/);
+  assert.match(settingsSource, /historyVersions: HistoryVersionEntry\[\]/);
+  assert.match(settingsSource, /lastSyncedAt: string \| null/);
   assert.match(settingsSource, /snapshotPath: string/);
   assert.match(settingsSource, /sourcePath: string/);
+  assert.match(settingsSource, /name\?: string/);
+  assert.match(settingsSource, /squashedIntoHash\?: string/);
   assert.match(settingsSource, /historySnapshots: \[\]/);
+  assert.match(settingsSource, /historyVersions: \[\]/);
+  assert.match(settingsSource, /lastSyncedAt: null/);
 });

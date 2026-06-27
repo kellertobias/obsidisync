@@ -235,7 +235,7 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         .unwrap();
     assert_eq!(sync_note.status(), StatusCode::OK);
 
-    let feed_page = app
+    let login_form = app
         .clone()
         .oneshot(
             Request::builder()
@@ -249,11 +249,89 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         )
         .await
         .unwrap();
+    assert_eq!(login_form.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        login_form.headers().get(header::LOCATION).unwrap(),
+        "/change-feed"
+    );
+    let site_cookie = login_form
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(site_cookie.starts_with("obsync_session="), "{site_cookie}");
+    assert!(site_cookie.contains("Path=/"), "{site_cookie}");
+    assert!(site_cookie.contains("Max-Age=43200"), "{site_cookie}");
+    assert!(site_cookie.contains("HttpOnly"), "{site_cookie}");
+    assert!(site_cookie.contains("SameSite=Strict"), "{site_cookie}");
+    assert!(!site_cookie.contains("Secure"), "{site_cookie}");
+
+    let secure_login_form = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .header("x-forwarded-proto", "https")
+                .body(Body::from(
+                    "username=alice&password=correct-horse-battery-staple",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let secure_site_cookie = secure_login_form
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        secure_site_cookie.contains("Secure"),
+        "{secure_site_cookie}"
+    );
+
+    let feed_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/change-feed")
+                .header(header::COOKIE, site_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(feed_page.status(), StatusCode::OK);
     let feed_html = response_text(feed_page).await;
+    assert!(feed_html.contains("Change feed"), "{feed_html}");
     assert!(feed_html.contains("Recent changes"), "{feed_html}");
     assert!(feed_html.contains("personal"), "{feed_html}");
     assert!(feed_html.contains("Note.md"), "{feed_html}");
+
+    let unauthenticated_feed_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/change-feed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated_feed_page.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        unauthenticated_feed_page
+            .headers()
+            .get(header::LOCATION)
+            .unwrap(),
+        "/login"
+    );
 
     let feed_api = app
         .clone()

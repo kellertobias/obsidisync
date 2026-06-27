@@ -85,6 +85,7 @@ export class GitService {
       }
 
       this.settings.serverHead = response.serverHead;
+      this.settings.lastSyncedAt = new Date().toISOString();
       this.settings.localManifest = await vaultState.computeManifest();
       await this.saveSettings();
 
@@ -117,6 +118,7 @@ export class GitService {
       const vaultState = new VaultState(this.vault);
       await vaultState.applyServerFiles(response.files);
       this.settings.serverHead = response.serverHead;
+      this.settings.lastSyncedAt = new Date().toISOString();
       this.settings.localManifest = await vaultState.computeManifest();
       await this.saveSettings();
       new Notice(response.status === "conflict" ? "Conflict remains after resolve attempt" : "Conflict resolution pushed");

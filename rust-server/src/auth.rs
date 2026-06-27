@@ -130,6 +130,10 @@ impl AuthVerifier {
             .strip_prefix("Bearer ")
             .ok_or_else(|| anyhow!("authorization header must use Bearer"))?;
 
+        self.verify_bearer_token(token).await
+    }
+
+    pub async fn verify_bearer_token(&self, token: &str) -> Result<AuthContext> {
         match self {
             AuthVerifier::Oidc(verifier) => verifier.verify_token(token).await,
             AuthVerifier::Password(verifier) => {

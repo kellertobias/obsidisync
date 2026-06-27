@@ -10,6 +10,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
+const SITE_SESSION_COOKIE: &str = "obsync_session";
+
 #[derive(Clone)]
 pub struct AppState {
     pub vaults: VaultService,
@@ -66,6 +68,7 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
     let router = Router::new()
         .route("/", get(password_page))
         .route("/login", get(password_page).post(password_form))
+        .route("/change-feed", get(change_feed_page))
         .route(
             "/health",
             get(|| async { Json(serde_json::json!({ "ok": true })) }),
@@ -159,8 +162,9 @@ async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String
 
 async fn password_form(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<PasswordLoginForm>,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
     let configured = state.auth.password_is_configured().await?;
     let result = if configured {
         state
@@ -178,21 +182,46 @@ async fn password_form(
 
     match result {
         Ok(session) => {
-            let feed = state.vaults.activity_feed(&session.user, 50).await?;
-            Ok(Html(render_password_page(
-                true,
-                Some(format!("Access token created for {}.", session.user)),
-                Some(session.access_token),
-                &feed,
-            )))
+            if configured {
+                Ok(redirect_with_site_session(
+                    "/change-feed",
+                    &session.access_token,
+                    site_session_cookie_is_secure(&headers),
+                ))
+            } else {
+                let feed = state.vaults.activity_feed(&session.user, 50).await?;
+                Ok(Html(render_password_page(
+                    true,
+                    Some(format!("Access token created for {}.", session.user)),
+                    Some(session.access_token.clone()),
+                    &feed,
+                ))
+                .into_response())
+            }
         }
         Err(error) => Ok(Html(render_password_page(
             configured,
             Some(error.to_string()),
             None,
             &[],
-        ))),
+        ))
+        .into_response()),
     }
+}
+
+async fn change_feed_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let Some(token) = site_session_token(&headers) else {
+        return Ok(redirect_to_login());
+    };
+    let auth = match state.auth.verify_bearer_token(&token).await {
+        Ok(auth) => auth,
+        Err(_) => return Ok(redirect_to_login()),
+    };
+    let feed = state.vaults.activity_feed(&auth.user, 50).await?;
+    Ok(Html(render_change_feed_page(&auth.user, &feed)).into_response())
 }
 
 async fn setup_password(
@@ -297,6 +326,40 @@ button {{ cursor: pointer; font-weight: 700; }}
 </main>
 </body>
 </html>"#
+    )
+}
+
+fn render_change_feed_page(user: &str, feed: &[ActivityFeedEntry]) -> String {
+    let feed_html = render_feed(feed);
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Change feed - Obsync</title>
+<style>
+:root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+body {{ margin: 0; min-height: 100vh; background: Canvas; color: CanvasText; }}
+main {{ width: min(860px, calc(100vw - 32px)); margin: 0 auto; padding: 2rem 0; }}
+h1 {{ font-size: 1.6rem; margin: 0 0 0.25rem; }}
+.meta, .files {{ margin: 0; color: color-mix(in srgb, CanvasText 72%, transparent); font-size: 0.88rem; }}
+.feed {{ margin-top: 2rem; }}
+.feed ol {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 0.9rem; }}
+.feed li {{ border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; padding: 0.9rem; }}
+.feed h3 {{ margin: 0 0 0.25rem; font-size: 1rem; }}
+.files {{ margin-top: 0.5rem; overflow-wrap: anywhere; }}
+</style>
+</head>
+<body>
+<main>
+<h1>Change feed</h1>
+<p class="meta">Signed in as {}</p>
+{feed_html}
+</main>
+</body>
+</html>"#,
+        escape_html(user)
     )
 }
 
@@ -477,4 +540,92 @@ async fn authorize(
         )));
     }
     Ok(())
+}
+
+fn redirect_with_site_session(location: &str, access_token: &str, secure: bool) -> Response {
+    let secure_attribute = if secure { "; Secure" } else { "" };
+    (
+        StatusCode::SEE_OTHER,
+        [
+            (header::LOCATION, location.to_string()),
+            (
+                header::SET_COOKIE,
+                format!(
+                    "{SITE_SESSION_COOKIE}={}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict{secure_attribute}",
+                    cookie_encode(access_token),
+                ),
+            ),
+        ],
+    )
+        .into_response()
+}
+
+fn site_session_cookie_is_secure(headers: &HeaderMap) -> bool {
+    header_contains_token(headers, "x-forwarded-proto", "https")
+        || header_contains_token(headers, "x-forwarded-ssl", "on")
+        || headers
+            .get("forwarded")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split([',', ';'])
+                    .any(|part| part.trim().eq_ignore_ascii_case("proto=https"))
+            })
+}
+
+fn header_contains_token(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|part| part.trim().eq_ignore_ascii_case(expected))
+        })
+}
+
+fn redirect_to_login() -> Response {
+    (StatusCode::SEE_OTHER, [(header::LOCATION, "/login")]).into_response()
+}
+
+fn site_session_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(name, value)| {
+            (name == SITE_SESSION_COOKIE).then(|| cookie_decode(value).unwrap_or_default())
+        })
+        .filter(|value| !value.is_empty())
+}
+
+fn cookie_encode(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn cookie_decode(value: &str) -> Option<String> {
+    let mut output = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = value.get(index + 1..index + 3)?;
+            output.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            output.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).ok()
 }

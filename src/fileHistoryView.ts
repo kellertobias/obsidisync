@@ -1,4 +1,4 @@
-import { ItemView, MarkdownView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, MarkdownView, Modal, Notice, setIcon, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { base64ToArrayBuffer } from "./base64";
 import { GitService } from "./gitService";
 import { HISTORY_SNAPSHOT_DIR } from "./ignore";
@@ -32,6 +32,11 @@ export interface HistorySnapshotReference {
 export interface HistorySnapshotStore {
   get(path: string): HistorySnapshotReference | null;
   save(reference: HistorySnapshotReference): Promise<void>;
+  getVersionName(sourcePath: string, hash: string): string | null;
+  saveVersionName(sourcePath: string, hash: string, name: string | null): Promise<void>;
+  isVersionSquashed(sourcePath: string, hash: string): boolean;
+  squashVersion(sourcePath: string, hash: string, intoHash: string): Promise<void>;
+  lastSyncedAt(): string | null;
 }
 
 export class FileHistoryView extends ItemView {
@@ -65,13 +70,15 @@ export class FileHistoryView extends ItemView {
   protected async onOpen(): Promise<void> {
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (file) void this.showFile(file.path);
+        void this.showFile(file?.path ?? null);
       })
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const view = leaf?.view;
-        if (view instanceof MarkdownView && view.file) void this.showFile(view.file.path);
+        if (view instanceof MarkdownView && view.file) {
+          void this.showFile(view.file.path);
+        }
       })
     );
     await this.refreshCurrentFile();
@@ -83,12 +90,12 @@ export class FileHistoryView extends ItemView {
       await this.showFile(file.path);
       return;
     }
-    if (!this.filePath) await this.refresh();
+    await this.showFile(null);
   }
 
   async showFile(path: string | null): Promise<void> {
     const resolved = this.resolveHistorySnapshot(path);
-    if (!resolved.path && this.filePath) {
+    if (path && !resolved.path && this.filePath) {
       await this.refresh();
       return;
     }
@@ -113,15 +120,22 @@ export class FileHistoryView extends ItemView {
     this.applyLayoutStyles(contentEl);
 
     if (!this.filePath) {
-      contentEl.createEl("p", { text: "Open a Markdown file to view its history." });
+      this.renderNoActiveFile(contentEl);
       return;
     }
 
     const statusEl = contentEl.createDiv();
+    statusEl.style.flex = "0 0 auto";
+    statusEl.style.position = "sticky";
+    statusEl.style.top = "0";
+    statusEl.style.zIndex = "1";
     this.renderStatus(statusEl, null);
 
     const listEl = contentEl.createDiv();
+    listEl.style.flex = "1 1 auto";
+    listEl.style.minHeight = "0";
     listEl.style.minWidth = "0";
+    listEl.style.overflow = "hidden";
 
     listEl.createEl("p", { text: "Loading history..." });
     try {
@@ -193,6 +207,25 @@ export class FileHistoryView extends ItemView {
     this.renderMeta(meta, "Source", status?.source ?? "Checking...");
   }
 
+  private renderNoActiveFile(container: HTMLElement): void {
+    const empty = container.createDiv();
+    empty.style.flex = "1 1 auto";
+    empty.style.minHeight = "0";
+    empty.style.display = "flex";
+    empty.style.flexDirection = "column";
+    empty.style.alignItems = "center";
+    empty.style.justifyContent = "center";
+    empty.style.gap = "10px";
+    empty.style.textAlign = "center";
+
+    const lastSynced = empty.createEl("div", { text: `Last Synced: ${formatLastSynced(this.snapshots.lastSyncedAt())}` });
+    lastSynced.style.fontWeight = "700";
+
+    const syncButton = empty.createEl("button", { text: this.syncing ? "Syncing" : "Sync Now", attr: { type: "button" } });
+    syncButton.disabled = this.syncing;
+    syncButton.onclick = () => this.syncNow();
+  }
+
   private renderMeta(container: HTMLElement, label: string, value: string): void {
     const item = container.createDiv();
     item.style.minWidth = "0";
@@ -220,13 +253,24 @@ export class FileHistoryView extends ItemView {
 
     const list = container.createEl("div");
     list.style.display = "grid";
+    list.style.alignContent = "start";
     list.style.gap = "6px";
-    list.style.maxHeight = "62vh";
+    list.style.height = "100%";
+    list.style.minHeight = "0";
     list.style.overflow = "auto";
 
-    for (const [index, entry] of this.history.slice(0, 80).entries()) {
+    const visibleHistory = this.history.filter((entry) => !this.isVersionSquashed(entry)).slice(0, 80);
+
+    for (const [index, entry] of visibleHistory.entries()) {
+      const versionNumber = visibleHistory.length - index;
       const source = this.describeSource(entry);
-      const button = list.createEl("button", { attr: { type: "button" } });
+      const item = list.createDiv();
+      item.style.display = "grid";
+      item.style.gridTemplateColumns = "minmax(0, 1fr) auto";
+      item.style.gap = "6px";
+      item.style.alignItems = "stretch";
+
+      const button = item.createEl("button", { attr: { type: "button" } });
       button.style.textAlign = "left";
       button.style.padding = "9px";
       button.style.border = "1px solid var(--background-modifier-border)";
@@ -246,11 +290,23 @@ export class FileHistoryView extends ItemView {
       row.style.gap = "12px";
       row.style.flex = "1 1 auto";
       row.style.width = "100%";
-      const dateEl = row.createEl("div", { text: formatDate(entry.date) });
+
+      const titleWrap = row.createDiv();
+      titleWrap.style.minWidth = "0";
+      const name = this.versionName(entry);
+      const versionEl = titleWrap.createEl("div", { text: name ? `Version ${versionNumber}: ${name}` : `Version ${versionNumber}` });
+      versionEl.style.fontWeight = "700";
+      versionEl.style.color = this.selectedHash === entry.hash ? "var(--text-accent)" : "var(--text-normal)";
+      versionEl.style.overflow = "hidden";
+      versionEl.style.textOverflow = "ellipsis";
+      versionEl.style.whiteSpace = "nowrap";
+      versionEl.title = name ? `Version ${versionNumber}: ${name}` : `Version ${versionNumber}`;
+      const dateEl = titleWrap.createEl("div", { text: formatDate(entry.date) });
       dateEl.style.display = "flex";
       dateEl.style.alignItems = "center";
       dateEl.style.justifyContent = "flex-start";
-      dateEl.style.fontWeight = "700";
+      dateEl.style.fontSize = "12px";
+      dateEl.style.color = "var(--text-muted)";
       dateEl.style.textAlign = "left";
       dateEl.style.overflow = "hidden";
       dateEl.style.textOverflow = "ellipsis";
@@ -268,8 +324,65 @@ export class FileHistoryView extends ItemView {
       deviceEl.style.whiteSpace = "nowrap";
       deviceEl.title = source.label;
 
-      button.onclick = () => this.openVersion(entry, index + 1);
+      button.onclick = () => this.openVersion(entry, versionNumber);
+
+      const actions = item.createDiv();
+      actions.style.display = "flex";
+      actions.style.alignItems = "center";
+      actions.style.gap = "4px";
+
+      const nameButton = this.createIconButton(actions, "pencil", "Name version");
+      nameButton.onclick = () => this.nameVersion(entry);
+
+      if (index > 0) {
+        const intoVersionNumber = visibleHistory.length - index + 1;
+        const squashButton = this.createIconButton(actions, "combine", `Squash Version ${versionNumber} into Version ${intoVersionNumber}`);
+        squashButton.onclick = () => this.squashVersion(entry, visibleHistory[index - 1], versionNumber);
+      }
     }
+  }
+
+  private createIconButton(container: HTMLElement, icon: string, label: string): HTMLButtonElement {
+    const button = container.createEl("button", { attr: { type: "button", "aria-label": label, title: label } });
+    button.style.display = "inline-flex";
+    button.style.alignItems = "center";
+    button.style.justifyContent = "center";
+    button.style.width = "32px";
+    button.style.height = "32px";
+    button.style.padding = "0";
+    setIcon(button, icon);
+    return button;
+  }
+
+  private versionName(entry: HistoryEntry): string | null {
+    if (!this.filePath) return null;
+    return this.snapshots.getVersionName(this.filePath, entry.hash);
+  }
+
+  private isVersionSquashed(entry: HistoryEntry): boolean {
+    if (!this.filePath) return false;
+    return this.snapshots.isVersionSquashed(this.filePath, entry.hash);
+  }
+
+  private nameVersion(entry: HistoryEntry): void {
+    if (!this.filePath) return;
+    const sourcePath = this.filePath;
+    const hash = entry.hash;
+    const current = this.versionName(entry) ?? "";
+    new VersionNameModal(this.app, current, async (name) => {
+      const trimmed = name.trim();
+      await this.snapshots.saveVersionName(sourcePath, hash, trimmed || null);
+      await this.refresh();
+    }).open();
+  }
+
+  private async squashVersion(entry: HistoryEntry, intoEntry: HistoryEntry, versionNumber: number): Promise<void> {
+    if (!this.filePath) return;
+    const ok = window.confirm(`Squash Version ${versionNumber} into a newer version? This only collapses the local history list.`);
+    if (!ok) return;
+    await this.snapshots.squashVersion(this.filePath, entry.hash, intoEntry.hash);
+    if (this.selectedHash === entry.hash) this.selectedHash = intoEntry.hash;
+    await this.refresh();
   }
 
   private async openVersion(entry: HistoryEntry, versionNumber: number): Promise<void> {
@@ -441,7 +554,62 @@ export class FileHistoryView extends ItemView {
 
   private applyLayoutStyles(container: HTMLElement): void {
     container.style.height = "100%";
-    container.style.overflow = "auto";
+    container.style.display = "flex";
+    container.style.flexDirection = "column";
+    container.style.minHeight = "0";
+    container.style.overflow = "hidden";
+  }
+}
+
+class VersionNameModal extends Modal {
+  private value: string;
+
+  constructor(
+    app: App,
+    currentName: string,
+    private readonly saveName: (name: string) => Promise<void>
+  ) {
+    super(app);
+    this.value = currentName;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "Name version" });
+
+    let input: HTMLInputElement | null = null;
+    new Setting(contentEl).setName("Name").addText((text) => {
+      input = text.inputEl;
+      text.setValue(this.value).onChange((value) => {
+        this.value = value;
+      });
+      text.inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          void this.save();
+        }
+      });
+    });
+
+    new Setting(contentEl).addButton((button) =>
+      button
+        .setCta()
+        .setButtonText("Save")
+        .onClick(() => {
+          void this.save();
+        })
+    );
+
+    window.setTimeout(() => {
+      input?.focus();
+      input?.select();
+    }, 0);
+  }
+
+  private async save(): Promise<void> {
+    await this.saveName(this.value);
+    this.close();
   }
 }
 
@@ -492,6 +660,11 @@ function formatDate(date: string): string {
 function formatDateFromMs(timestamp: number): string {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "Unknown";
   return new Date(timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function formatLastSynced(date: string | null): string {
+  if (!date) return "Never";
+  return formatDate(date);
 }
 
 function snapshotPath(originalPath: string, entry: HistoryEntry, computerName: string, versionNumber: number, attempt = 0): string {

@@ -10,9 +10,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_NAME: opensource/obsync
-
 jobs:
   plugin:
     name: Obsidian Plugin Build
@@ -63,15 +60,32 @@ jobs:
     runs-on: ubuntu-latest
     needs: [plugin, rust-server]
     steps:
+      - name: Export CI environment
+        run: |
+          append_env() {
+            name="$1"
+            value="$2"
+            delimiter="obsync_env_$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+          }
+
+          append_env IMAGE_PREFIX "$IMAGE_PREFIX"
+          append_env REGISTRY_USERNAME "$REGISTRY_USERNAME"
+          append_env REGISTRY_PASSWORD "$REGISTRY_PASSWORD"
+          append_env REGISTRY_HOST "$REGISTRY_HOST"
       - uses: actions/checkout@v4
 
       - name: Build & push image
         uses: https://git.tokenet.de/shared/build-actions/docker-build@main
         with:
-          registry: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/live' || github.ref == 'refs/heads/master') && 'registry.tokenet.de' || '' }}
+          registry: ${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/live' || github.ref == 'refs/heads/master') && env.REGISTRY_HOST || '' }}
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
-          image: ${{ env.IMAGE_NAME }}
+          image: ${{ env.IMAGE_PREFIX }}
           tag: ${{ github.sha }},latest
           cache: 'false'
 
@@ -79,15 +93,32 @@ jobs:
     name: Update NAS image
     runs-on: ubuntu-latest
     needs: [docker]
-    if: false
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/live' || github.ref == 'refs/heads/master'
     steps:
+      - name: Export CI environment
+        run: |
+          append_env() {
+            name="$1"
+            value="$2"
+            delimiter="obsync_env_$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            {
+              printf '%s<<%s\n' "$name" "$delimiter"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delimiter"
+            } >> "$GITHUB_ENV"
+          }
+
+          append_env IMAGE_PREFIX "$IMAGE_PREFIX"
+          append_env REGISTRY_HOST "$REGISTRY_HOST"
+          append_env NAS_CONTROL_PULL_IMAGE_URL "$NAS_CONTROL_PULL_IMAGE_URL"
       - name: Update NAS image
         run: |
-          IMAGE="registry.tokenet.de/${{ env.IMAGE_NAME }}:latest"
+          IMAGE="${REGISTRY_HOST}/${IMAGE_PREFIX}:latest"
           BODY="$(mktemp)"
 
-          echo "NAS update endpoint: ${NAS_CONTROL_PULL_IMAGE_URL:-<missing>}"
           echo "NAS update image: $IMAGE"
+          echo "IMAGE_PREFIX=${IMAGE_PREFIX:-<missing>}"
+          echo "REGISTRY_HOST=${REGISTRY_HOST:-<missing>}"
 
           STATUS="$(
             curl -sS \

@@ -25,7 +25,12 @@ export default class ObsyncPlugin extends Plugin {
       (leaf) =>
         new FileHistoryView(leaf, this.gitService, {
           get: (path) => this.snapshotReference(path),
-          save: (reference) => this.saveSnapshotReference(reference)
+          save: (reference) => this.saveSnapshotReference(reference),
+          getVersionName: (sourcePath, hash) => this.versionMetadata(sourcePath, hash)?.name?.trim() || null,
+          saveVersionName: (sourcePath, hash, name) => this.saveVersionName(sourcePath, hash, name),
+          isVersionSquashed: (sourcePath, hash) => Boolean(this.versionMetadata(sourcePath, hash)?.squashedIntoHash),
+          squashVersion: (sourcePath, hash, intoHash) => this.squashVersion(sourcePath, hash, intoHash),
+          lastSyncedAt: () => this.settings.lastSyncedAt
         })
     );
 
@@ -132,6 +137,42 @@ export default class ObsyncPlugin extends Plugin {
   private async saveSnapshotReference(reference: HistorySnapshotReference): Promise<void> {
     const withoutExisting = this.settings.historySnapshots.filter((snapshot) => snapshot.snapshotPath !== reference.snapshotPath);
     this.settings.historySnapshots = [...withoutExisting, reference].slice(-200);
+    await this.saveSettings();
+  }
+
+  private versionMetadata(sourcePath: string, hash: string): { sourcePath: string; hash: string; name?: string; squashedIntoHash?: string } | null {
+    return this.settings.historyVersions.find((version) => version.sourcePath === sourcePath && version.hash === hash) ?? null;
+  }
+
+  private async saveVersionName(sourcePath: string, hash: string, name: string | null): Promise<void> {
+    const current = this.versionMetadata(sourcePath, hash);
+    await this.saveVersionMetadata({
+      sourcePath,
+      hash,
+      name: name ?? undefined,
+      squashedIntoHash: current?.squashedIntoHash
+    });
+  }
+
+  private async squashVersion(sourcePath: string, hash: string, intoHash: string): Promise<void> {
+    const current = this.versionMetadata(sourcePath, hash);
+    await this.saveVersionMetadata({
+      sourcePath,
+      hash,
+      name: current?.name,
+      squashedIntoHash: intoHash
+    });
+  }
+
+  private async saveVersionMetadata(entry: { sourcePath: string; hash: string; name?: string; squashedIntoHash?: string }): Promise<void> {
+    const withoutExisting = this.settings.historyVersions.filter(
+      (version) => version.sourcePath !== entry.sourcePath || version.hash !== entry.hash
+    );
+    if (!entry.name && !entry.squashedIntoHash) {
+      this.settings.historyVersions = withoutExisting;
+    } else {
+      this.settings.historyVersions = [...withoutExisting, entry].slice(-500);
+    }
     await this.saveSettings();
   }
 
