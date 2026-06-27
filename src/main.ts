@@ -1,9 +1,9 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
+import { FILE_HISTORY_VIEW_TYPE, FileHistoryView } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
 import { createClientId } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
-import { FileVersionsModal } from "./versionModal";
 
 export default class ObsyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
@@ -19,8 +19,11 @@ export default class ObsyncPlugin extends Plugin {
 
     this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings());
 
+    this.registerView(FILE_HISTORY_VIEW_TYPE, (leaf) => new FileHistoryView(leaf, this.gitService));
+
     this.addSettingTab(new IosGitSyncSettingTab(this.app, this));
     this.addRibbonIcon("refresh-cw", "Sync vault", () => this.runCommand(() => this.gitService.sync()));
+    this.addRibbonIcon("history", "Open file history", () => this.openFileHistoryView());
 
     this.addCommand({
       id: "sync-now",
@@ -42,8 +45,8 @@ export default class ObsyncPlugin extends Plugin {
 
     this.addCommand({
       id: "show-current-file-versions",
-      name: "Show current file versions",
-      callback: () => this.showCurrentFileVersions()
+      name: "Open file history view",
+      callback: () => this.openFileHistoryView()
     });
 
     this.addCommand({
@@ -104,13 +107,17 @@ export default class ObsyncPlugin extends Plugin {
     new Notice("Local sync state reset");
   }
 
-  private async showCurrentFileVersions(): Promise<void> {
-    const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-    if (!file) {
-      new Notice("Open a file before showing versions");
-      return;
+  private async openFileHistoryView(): Promise<void> {
+    let leaf = this.app.workspace.getLeavesOfType(FILE_HISTORY_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = this.app.workspace.getRightLeaf(false) ?? this.app.workspace.getLeaf(true);
+      await leaf.setViewState({ type: FILE_HISTORY_VIEW_TYPE, active: true });
     }
-    new FileVersionsModal(this.app, this.gitService, file.path).open();
+    await this.app.workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (view instanceof FileHistoryView) {
+      await view.refreshCurrentFile();
+    }
   }
 
   private async resolveCurrentFile(): Promise<void> {
