@@ -81,6 +81,8 @@ npm run start:server
 
 Then open `/login` on the server, enter the configured username, and set the password. The page returns an access token. Paste that token into the Obsidian plugin access token field. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
 
+After logging in, the page also shows a recent change feed for the user's synced vaults.
+
 Local development token mode:
 
 ```bash
@@ -169,6 +171,7 @@ If a conflict remains, the plugin receives conflict-marker content and writes it
 - `POST /v1/users/{user}/vaults/{vault}/uploads/{upload}/chunk`
 - `POST /v1/users/{user}/vaults/{vault}/uploads/{upload}/complete`
 - `POST /v1/users/{user}/vaults/{vault}/sync`
+- `GET /v1/users/{user}/feed`
 - `GET /v1/users/{user}/vaults/{vault}/history?path=Note.md`
 - `GET /v1/users/{user}/vaults/{vault}/file?path=Note.md&hash=<commit>`
 - `POST /v1/users/{user}/vaults/{vault}/resolve`

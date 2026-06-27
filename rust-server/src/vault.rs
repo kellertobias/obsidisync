@@ -14,7 +14,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -348,6 +348,136 @@ impl VaultService {
             .trim()
             .to_string();
         Ok(parse_history_output(&output))
+    }
+
+    pub async fn activity_feed(&self, user: &str, limit: usize) -> Result<Vec<ActivityFeedEntry>> {
+        let user = validate_slug(user, "user")?;
+        let mut entries = Vec::new();
+        let vaults_dir = self.data_dir.join("users").join(&user).join("vaults");
+        let mut vaults = match fs::read_dir(vaults_dir).await {
+            Ok(vaults) => vaults,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
+            Err(error) => return Err(error.into()),
+        };
+
+        while let Some(entry) = vaults.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let vault = entry.file_name().to_string_lossy().to_string();
+            if validate_slug(&vault, "vault").is_err() {
+                continue;
+            }
+            let mut vault_entries = self
+                .with_lock(&user, &vault, || async {
+                    self.vault_activity(&user, &vault, limit).await
+                })
+                .await?;
+            entries.append(&mut vault_entries);
+        }
+
+        entries.sort_by(|left, right| {
+            right
+                .date
+                .cmp(&left.date)
+                .then_with(|| right.hash.cmp(&left.hash))
+        });
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
+    async fn vault_activity(
+        &self,
+        user: &str,
+        vault: &str,
+        limit: usize,
+    ) -> Result<Vec<ActivityFeedEntry>> {
+        let repo = self.repo_dir(user, vault);
+        if fs::metadata(repo.join(".git")).await.is_err() {
+            return Ok(Vec::new());
+        }
+        let limit_arg = format!("-n{}", limit.clamp(1, 100));
+        let output = git(
+            Some(&repo),
+            &["log", &limit_arg, "--format=%H%x09%aI%x09%an%x09%s"],
+            &[0, 128],
+        )
+        .await?;
+        if output.code != 0 {
+            return Ok(Vec::new());
+        }
+
+        let history = parse_history_output(&String::from_utf8_lossy(&output.stdout));
+        let mut entries = Vec::with_capacity(history.len());
+        for entry in history {
+            let files = self.changed_paths_for_commit(&repo, &entry.hash).await?;
+            entries.push(ActivityFeedEntry {
+                vault: vault.to_string(),
+                hash: entry.hash,
+                date: entry.date,
+                author: entry.author,
+                subject: entry.subject,
+                files,
+            });
+        }
+        Ok(entries)
+    }
+
+    async fn changed_paths_for_commit(&self, repo: &Path, commit: &str) -> Result<Vec<String>> {
+        let commit = validate_commit_id(commit)?;
+        let output = git(
+            Some(repo),
+            &[
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "--root",
+                "-z",
+                &commit,
+            ],
+            &[0],
+        )
+        .await?;
+        let mut paths = BTreeSet::new();
+        for path in split_nul(&output.stdout) {
+            let path = validate_vault_path(&path)?;
+            if path == BINARY_MANIFEST_PATH {
+                for binary_path in self.changed_binary_paths_for_commit(repo, &commit).await? {
+                    paths.insert(binary_path);
+                }
+            } else if is_client_visible_conflict_path(&path) {
+                paths.insert(path);
+            }
+        }
+        Ok(paths.into_iter().collect())
+    }
+
+    async fn changed_binary_paths_for_commit(
+        &self,
+        repo: &Path,
+        commit: &str,
+    ) -> Result<Vec<String>> {
+        let current = self
+            .binary_manifest_at(repo, commit)
+            .await
+            .unwrap_or_default();
+        let parent = self
+            .binary_manifest_at(repo, &format!("{}^", commit))
+            .await
+            .unwrap_or_default();
+        let mut paths = BTreeSet::new();
+        for (path, entry) in &current.files {
+            if parent.files.get(path) != Some(entry) {
+                paths.insert(path.clone());
+            }
+        }
+        for path in parent.files.keys() {
+            if !current.files.contains_key(path) {
+                paths.insert(path.clone());
+            }
+        }
+        Ok(paths.into_iter().collect())
     }
 
     async fn binary_history(&self, repo: &Path, path: &str) -> Result<Vec<HistoryEntry>> {

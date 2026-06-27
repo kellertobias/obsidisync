@@ -152,6 +152,17 @@ pub struct HistoryEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct ActivityFeedEntry {
+    pub vault: String,
+    pub hash: String,
+    pub date: String,
+    pub author: String,
+    pub subject: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct VersionFileResponse {
     pub path: String,
     pub hash: String,

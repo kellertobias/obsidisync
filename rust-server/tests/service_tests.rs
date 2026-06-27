@@ -197,6 +197,84 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
     let token = login_body["accessToken"].as_str().unwrap();
     assert!(!token.is_empty());
 
+    let register_vault = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/personal/register")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&local_register_request()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(register_vault.status(), StatusCode::OK);
+
+    let sync_note = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/personal/sync")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&SyncRequest {
+                        changes: vec![upsert("Note.md", b"hello feed\n")],
+                        ..empty_sync(None)
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync_note.status(), StatusCode::OK);
+
+    let feed_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=alice&password=correct-horse-battery-staple",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(feed_page.status(), StatusCode::OK);
+    let feed_html = response_text(feed_page).await;
+    assert!(feed_html.contains("Recent changes"), "{feed_html}");
+    assert!(feed_html.contains("personal"), "{feed_html}");
+    assert!(feed_html.contains("Note.md"), "{feed_html}");
+
+    let feed_api = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/users/alice/feed")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(feed_api.status(), StatusCode::OK);
+    let feed_body = response_json(feed_api).await;
+    assert_eq!(feed_body[0]["vault"], "personal");
+    assert!(feed_body[0]["files"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("Note.md".to_string())));
+
     let wrong_password = app
         .clone()
         .oneshot(

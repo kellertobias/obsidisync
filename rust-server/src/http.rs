@@ -72,6 +72,7 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
         )
         .route("/v1/auth/password/setup", post(setup_password))
         .route("/v1/auth/password/login", post(login_password))
+        .route("/v1/users/:user/feed", get(feed))
         .route("/v1/users/:user/vaults/:vault/register", post(register))
         .route("/v1/users/:user/vaults/:vault/uploads", post(init_upload))
         .route(
@@ -153,7 +154,7 @@ struct PasswordLoginForm {
 
 async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
     let configured = state.auth.password_is_configured().await?;
-    Ok(Html(render_password_page(configured, None, None)))
+    Ok(Html(render_password_page(configured, None, None, &[])))
 }
 
 async fn password_form(
@@ -176,15 +177,20 @@ async fn password_form(
     };
 
     match result {
-        Ok(session) => Ok(Html(render_password_page(
-            true,
-            Some(format!("Access token created for {}.", session.user)),
-            Some(session.access_token),
-        ))),
+        Ok(session) => {
+            let feed = state.vaults.activity_feed(&session.user, 50).await?;
+            Ok(Html(render_password_page(
+                true,
+                Some(format!("Access token created for {}.", session.user)),
+                Some(session.access_token),
+                &feed,
+            )))
+        }
         Err(error) => Ok(Html(render_password_page(
             configured,
             Some(error.to_string()),
             None,
+            &[],
         ))),
     }
 }
@@ -217,6 +223,7 @@ fn render_password_page(
     configured: bool,
     message: Option<String>,
     token: Option<String>,
+    feed: &[ActivityFeedEntry],
 ) -> String {
     let title = if configured { "Log in" } else { "Set password" };
     let password_label = if configured {
@@ -247,6 +254,7 @@ fn render_password_page(
             )
         })
         .unwrap_or_default();
+    let feed_html = render_feed(feed);
 
     format!(
         r#"<!doctype html>
@@ -258,7 +266,7 @@ fn render_password_page(
 <style>
 :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
 body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
-main {{ width: min(440px, calc(100vw - 32px)); }}
+main {{ width: min(760px, calc(100vw - 32px)); padding: 2rem 0; }}
 h1 {{ font-size: 1.5rem; margin: 0 0 1rem; }}
 form, section {{ display: grid; gap: 1rem; }}
 label {{ display: grid; gap: 0.35rem; font-weight: 600; }}
@@ -266,6 +274,12 @@ input, textarea, button {{ font: inherit; border: 1px solid color-mix(in srgb, C
 textarea {{ min-height: 8rem; resize: vertical; }}
 button {{ cursor: pointer; font-weight: 700; }}
 .message {{ margin: 0 0 1rem; color: CanvasText; }}
+.feed {{ margin-top: 2rem; }}
+.feed ol {{ list-style: none; padding: 0; margin: 0; display: grid; gap: 0.9rem; }}
+.feed li {{ border: 1px solid color-mix(in srgb, CanvasText 18%, transparent); border-radius: 8px; padding: 0.9rem; }}
+.feed h3 {{ margin: 0 0 0.25rem; font-size: 1rem; }}
+.meta, .files {{ margin: 0; color: color-mix(in srgb, CanvasText 72%, transparent); font-size: 0.88rem; }}
+.files {{ margin-top: 0.5rem; overflow-wrap: anywhere; }}
 </style>
 </head>
 <body>
@@ -279,10 +293,51 @@ button {{ cursor: pointer; font-weight: 700; }}
 <button type="submit">{title}</button>
 </form>
 {token_html}
+{feed_html}
 </main>
 </body>
 </html>"#
     )
+}
+
+fn render_feed(feed: &[ActivityFeedEntry]) -> String {
+    let items = if feed.is_empty() {
+        r#"<p class="meta">No synced changes yet.</p>"#.to_string()
+    } else {
+        let entries = feed
+            .iter()
+            .map(|entry| {
+                let files = if entry.files.is_empty() {
+                    "No file list recorded".to_string()
+                } else {
+                    let shown = entry
+                        .files
+                        .iter()
+                        .take(8)
+                        .map(|path| escape_html(path))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    if entry.files.len() > 8 {
+                        format!("{} and {} more", shown, entry.files.len() - 8)
+                    } else {
+                        shown
+                    }
+                };
+                format!(
+                    r#"<li><h3>{}</h3><p class="meta">{} · {} · {} · {}</p><p class="files">{}</p></li>"#,
+                    escape_html(&entry.subject),
+                    escape_html(&entry.vault),
+                    escape_html(&entry.author),
+                    escape_html(&entry.date),
+                    escape_html(&entry.hash.chars().take(12).collect::<String>()),
+                    files,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        format!("<ol>{entries}</ol>")
+    };
+    format!(r#"<section class="feed"><h2>Recent changes</h2>{items}</section>"#)
 }
 
 fn escape_html(value: &str) -> String {
@@ -302,6 +357,15 @@ async fn register(
 ) -> Result<Json<RegisterResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
     Ok(Json(state.vaults.register(&user, &vault, request).await?))
+}
+
+async fn feed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(user): Path<String>,
+) -> Result<Json<Vec<ActivityFeedEntry>>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(state.vaults.activity_feed(&user, 50).await?))
 }
 
 async fn sync(
