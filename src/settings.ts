@@ -21,6 +21,13 @@ export interface IosGitSyncSettings {
   clientId: string;
   serverHead: string | null;
   localManifest: ManifestEntry[];
+  historySnapshots: HistorySnapshotEntry[];
+}
+
+export interface HistorySnapshotEntry {
+  snapshotPath: string;
+  sourcePath: string;
+  hash: string;
 }
 
 export const DEFAULT_SETTINGS: IosGitSyncSettings = {
@@ -41,7 +48,8 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   syncIntervalMinutes: 10,
   clientId: "",
   serverHead: null,
-  localManifest: []
+  localManifest: [],
+  historySnapshots: []
 };
 
 export class IosGitSyncSettingTab extends PluginSettingTab {

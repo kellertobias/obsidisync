@@ -23,6 +23,17 @@ interface VersionSource {
   relation: "this" | "other" | "server" | "unknown";
 }
 
+export interface HistorySnapshotReference {
+  snapshotPath: string;
+  sourcePath: string;
+  hash: string;
+}
+
+export interface HistorySnapshotStore {
+  get(path: string): HistorySnapshotReference | null;
+  save(reference: HistorySnapshotReference): Promise<void>;
+}
+
 export class FileHistoryView extends ItemView {
   private filePath: string | null = null;
   private history: HistoryEntry[] = [];
@@ -33,7 +44,8 @@ export class FileHistoryView extends ItemView {
 
   constructor(
     leaf: WorkspaceLeaf,
-    private readonly gitService: GitService
+    private readonly gitService: GitService,
+    private readonly snapshots: HistorySnapshotStore
   ) {
     super(leaf);
   }
@@ -53,13 +65,13 @@ export class FileHistoryView extends ItemView {
   protected async onOpen(): Promise<void> {
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (file && !isHistorySnapshotPath(file.path)) void this.showFile(file.path);
+        if (file) void this.showFile(file.path);
       })
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const view = leaf?.view;
-        if (view instanceof MarkdownView && view.file && !isHistorySnapshotPath(view.file.path)) void this.showFile(view.file.path);
+        if (view instanceof MarkdownView && view.file) void this.showFile(view.file.path);
       })
     );
     await this.refreshCurrentFile();
@@ -67,7 +79,7 @@ export class FileHistoryView extends ItemView {
 
   async refreshCurrentFile(): Promise<void> {
     const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-    if (file && !isHistorySnapshotPath(file.path)) {
+    if (file) {
       await this.showFile(file.path);
       return;
     }
@@ -75,13 +87,21 @@ export class FileHistoryView extends ItemView {
   }
 
   async showFile(path: string | null): Promise<void> {
-    if (path === this.filePath) {
+    const resolved = this.resolveHistorySnapshot(path);
+    if (!resolved.path && this.filePath) {
       await this.refresh();
       return;
     }
-    this.filePath = path;
+
+    if (resolved.path === this.filePath) {
+      this.selectedHash = resolved.hash;
+      await this.refresh();
+      return;
+    }
+
+    this.filePath = resolved.path;
     this.history = [];
-    this.selectedHash = null;
+    this.selectedHash = resolved.hash;
     this.fileStatus = null;
     await this.refresh();
   }
@@ -279,14 +299,31 @@ export class FileHistoryView extends ItemView {
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         await this.app.vault.modifyBinary(existing, content);
+        await this.saveSnapshotReference(existing.path, entry.hash);
         return existing;
       }
 
       if (await this.app.vault.adapter.exists(path, true)) continue;
-      return this.app.vault.createBinary(path, content);
+      const created = await this.app.vault.createBinary(path, content);
+      await this.saveSnapshotReference(created.path, entry.hash);
+      return created;
     }
 
     throw new Error("Could not create a unique history snapshot file");
+  }
+
+  private async saveSnapshotReference(snapshotPath: string, hash: string): Promise<void> {
+    if (!this.filePath) return;
+    await this.snapshots.save({ snapshotPath, sourcePath: this.filePath, hash });
+  }
+
+  private resolveHistorySnapshot(path: string | null): { path: string | null; hash: string | null } {
+    if (!path || !isHistorySnapshotPath(path)) return { path, hash: null };
+
+    const reference = this.snapshots.get(path);
+    if (!reference) return { path: null, hash: null };
+
+    return { path: reference.sourcePath, hash: reference.hash };
   }
 
   private async ensureSnapshotFolder(): Promise<void> {

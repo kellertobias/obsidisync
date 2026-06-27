@@ -12,10 +12,12 @@ test("plugin registers a dockable Obsync file history view", () => {
   assert.match(viewSource, /extends ItemView/);
   assert.match(viewSource, /FILE_HISTORY_VIEW_TYPE = "obsync-file-history"/);
   assert.match(viewSource, /getDisplayText\(\): string \{\s*return "Obsync file history";/);
-  assert.match(mainSource, /registerView\(FILE_HISTORY_VIEW_TYPE/);
+  assert.match(mainSource, /registerView\(\s*FILE_HISTORY_VIEW_TYPE/);
   assert.match(mainSource, /getLeavesOfType\(FILE_HISTORY_VIEW_TYPE\)/);
   assert.match(mainSource, /activeFilePath/);
   assert.match(mainSource, /view\.showFile\(activeFilePath\)/);
+  assert.match(mainSource, /historySnapshots/);
+  assert.match(mainSource, /snapshotReference\(path\)/);
   assert.match(mainSource, /addRibbonIcon\("history", "Open file history"/);
   assert.doesNotMatch(mainSource, /FileVersionsModal/);
 });
@@ -52,6 +54,10 @@ test("file history view opens selected versions with the regular Obsidian file U
   assert.match(viewSource, /formatSnapshotDate/);
   assert.match(viewSource, /snapshotTitle/);
   assert.match(viewSource, /snapshotExtension/);
+  assert.match(viewSource, /saveSnapshotReference\(created\.path, entry\.hash\)/);
+  assert.match(viewSource, /resolveHistorySnapshot/);
+  assert.match(viewSource, /this\.snapshots\.get\(path\)/);
+  assert.match(viewSource, /return \{ path: reference\.sourcePath, hash: reference\.hash \}/);
   assert.match(viewSource, /openFile\(snapshot/);
   assert.match(viewSource, /isHistorySnapshotPath/);
   assert.doesNotMatch(viewSource, /MarkdownRenderer\.render/);

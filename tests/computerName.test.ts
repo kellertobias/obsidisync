@@ -30,3 +30,12 @@ test("sync uses the configured computer name as the device name", () => {
   assert.match(runtimeSource, /const configured = configuredDeviceName\?\.trim\(\)/);
   assert.match(runtimeSource, /if \(configured\) return configured/);
 });
+
+test("settings persist local history snapshot references", () => {
+  const settingsSource = readFileSync(join(root, "src", "settings.ts"), "utf8");
+
+  assert.match(settingsSource, /historySnapshots: HistorySnapshotEntry\[\]/);
+  assert.match(settingsSource, /snapshotPath: string/);
+  assert.match(settingsSource, /sourcePath: string/);
+  assert.match(settingsSource, /historySnapshots: \[\]/);
+});

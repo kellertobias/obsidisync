@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
 import { ComputerNameModal } from "./computerNameModal";
-import { FILE_HISTORY_VIEW_TYPE, FileHistoryView } from "./fileHistoryView";
+import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
 import { createClientId } from "./runtime";
@@ -20,7 +20,14 @@ export default class ObsyncPlugin extends Plugin {
 
     this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings());
 
-    this.registerView(FILE_HISTORY_VIEW_TYPE, (leaf) => new FileHistoryView(leaf, this.gitService));
+    this.registerView(
+      FILE_HISTORY_VIEW_TYPE,
+      (leaf) =>
+        new FileHistoryView(leaf, this.gitService, {
+          get: (path) => this.snapshotReference(path),
+          save: (reference) => this.saveSnapshotReference(reference)
+        })
+    );
 
     this.addSettingTab(new IosGitSyncSettingTab(this.app, this));
     this.addRibbonIcon("refresh-cw", "Sync vault", () => this.runCommand(() => this.gitService.sync()));
@@ -116,6 +123,16 @@ export default class ObsyncPlugin extends Plugin {
     this.settings.localManifest = [];
     await this.saveSettings();
     new Notice("Local sync state reset");
+  }
+
+  private snapshotReference(path: string): HistorySnapshotReference | null {
+    return this.settings.historySnapshots.find((snapshot) => snapshot.snapshotPath === path) ?? null;
+  }
+
+  private async saveSnapshotReference(reference: HistorySnapshotReference): Promise<void> {
+    const withoutExisting = this.settings.historySnapshots.filter((snapshot) => snapshot.snapshotPath !== reference.snapshotPath);
+    this.settings.historySnapshots = [...withoutExisting, reference].slice(-200);
+    await this.saveSettings();
   }
 
   private async openFileHistoryView(): Promise<void> {
