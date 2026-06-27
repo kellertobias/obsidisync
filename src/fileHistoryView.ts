@@ -204,7 +204,7 @@ export class FileHistoryView extends ItemView {
     list.style.maxHeight = "62vh";
     list.style.overflow = "auto";
 
-    for (const entry of this.history.slice(0, 80)) {
+    for (const [index, entry] of this.history.slice(0, 80).entries()) {
       const source = this.describeSource(entry);
       const button = list.createEl("button", { attr: { type: "button" } });
       button.style.textAlign = "left";
@@ -248,11 +248,11 @@ export class FileHistoryView extends ItemView {
       deviceEl.style.whiteSpace = "nowrap";
       deviceEl.title = source.label;
 
-      button.onclick = () => this.openVersion(entry);
+      button.onclick = () => this.openVersion(entry, index + 1);
     }
   }
 
-  private async openVersion(entry: HistoryEntry): Promise<void> {
+  private async openVersion(entry: HistoryEntry, versionNumber: number): Promise<void> {
     if (!this.filePath) return;
     const currentRequest = ++this.requestId;
     try {
@@ -260,7 +260,7 @@ export class FileHistoryView extends ItemView {
       if (currentRequest !== this.requestId) return;
       const content = base64ToArrayBuffer(version.contentBase64);
       this.selectedHash = entry.hash;
-      const snapshot = await this.writeVersionSnapshot(entry, content);
+      const snapshot = await this.writeVersionSnapshot(entry, content, versionNumber);
       const leaf = this.app.workspace.getLeaf("tab");
       await leaf.openFile(snapshot, { active: true, state: { mode: "preview" } });
       await this.refresh();
@@ -270,11 +270,12 @@ export class FileHistoryView extends ItemView {
     }
   }
 
-  private async writeVersionSnapshot(entry: HistoryEntry, content: ArrayBuffer): Promise<TFile> {
+  private async writeVersionSnapshot(entry: HistoryEntry, content: ArrayBuffer, versionNumber: number): Promise<TFile> {
     await this.ensureSnapshotFolder();
+    const source = this.describeSource(entry);
 
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      const path = snapshotPath(this.filePath ?? "version", entry, attempt);
+      const path = snapshotPath(this.filePath ?? "version", entry, source.device, versionNumber, attempt);
       const existing = this.app.vault.getAbstractFileByPath(path);
       if (existing instanceof TFile) {
         await this.app.vault.modifyBinary(existing, content);
@@ -456,22 +457,45 @@ function formatDateFromMs(timestamp: number): string {
   return new Date(timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function snapshotPath(originalPath: string, entry: HistoryEntry, attempt = 0): string {
-  const name = sanitizeSnapshotName(originalPath);
+function snapshotPath(originalPath: string, entry: HistoryEntry, computerName: string, versionNumber: number, attempt = 0): string {
+  const title = snapshotTitle(originalPath);
+  const extension = snapshotExtension(originalPath);
+  const version = String(Math.max(1, versionNumber)).padStart(2, "0");
+  const date = formatSnapshotDate(entry.date);
+  const computer = sanitizeSnapshotComponent(computerName || "Unknown computer");
   const suffix = attempt === 0 ? "" : `-${attempt + 1}`;
-  return `${HISTORY_SNAPSHOT_DIR}/${entry.hash.slice(0, 12)}${suffix}-${name}`;
+  return `${HISTORY_SNAPSHOT_DIR}/Version ${version} - ${date} - ${computer} - ${title}${suffix}${extension}`;
 }
 
-function sanitizeSnapshotName(path: string): string {
+function snapshotTitle(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
-  const fallback = normalized || "version.md";
-  return fallback
-    .split("/")
-    .filter(Boolean)
-    .join(" - ")
-    .replace(/[\0:*?"<>|]/g, "-")
-    .replace(/\s+/g, " ")
-    .slice(0, 120);
+  const name = normalized.split("/").filter(Boolean).pop() || "Untitled.md";
+  const dotIndex = name.lastIndexOf(".");
+  const title = dotIndex > 0 ? name.slice(0, dotIndex) : name;
+  return sanitizeSnapshotComponent(title || "Untitled");
+}
+
+function snapshotExtension(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  const name = normalized.split("/").filter(Boolean).pop() || "Untitled.md";
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === name.length - 1) return ".md";
+  return sanitizeSnapshotComponent(name.slice(dotIndex)).replace(/\s/g, "") || ".md";
+}
+
+function sanitizeSnapshotComponent(value: string): string {
+  return value.replace(/[\\/\0:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 80) || "Untitled";
+}
+
+function formatSnapshotDate(date: string): string {
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.valueOf())) return sanitizeSnapshotComponent(date);
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, "0");
+  const day = String(parsed.getDate()).padStart(2, "0");
+  const hour = String(parsed.getHours()).padStart(2, "0");
+  const minute = String(parsed.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hour}-${minute}`;
 }
 
 function isHistorySnapshotPath(path: string): boolean {

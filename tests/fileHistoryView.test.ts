@@ -46,7 +46,12 @@ test("file history view opens selected versions with the regular Obsidian file U
   assert.match(viewSource, /createBinary\(path, content\)/);
   assert.match(viewSource, /modifyBinary\(existing, content\)/);
   assert.match(viewSource, /adapter\.exists\(path, true\)/);
-  assert.match(viewSource, /snapshotPath\(this\.filePath \?\? "version", entry, attempt\)/);
+  assert.match(viewSource, /openVersion\(entry, index \+ 1\)/);
+  assert.match(viewSource, /snapshotPath\(this\.filePath \?\? "version", entry, source\.device, versionNumber, attempt\)/);
+  assert.match(viewSource, /`\$\{HISTORY_SNAPSHOT_DIR\}\/Version \$\{version\} - \$\{date\} - \$\{computer\} - \$\{title\}\$\{suffix\}\$\{extension\}`/);
+  assert.match(viewSource, /formatSnapshotDate/);
+  assert.match(viewSource, /snapshotTitle/);
+  assert.match(viewSource, /snapshotExtension/);
   assert.match(viewSource, /openFile\(snapshot/);
   assert.match(viewSource, /isHistorySnapshotPath/);
   assert.doesNotMatch(viewSource, /MarkdownRenderer\.render/);
