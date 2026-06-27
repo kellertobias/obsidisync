@@ -10,9 +10,9 @@ test("Obsidian manifest enables iOS, iPadOS, and macOS plugin loading", () => {
 
   assert.equal(manifest.isDesktopOnly, false);
   assert.equal(typeof manifest.minAppVersion, "string");
-  assert.match(manifest.description, /iOS/i);
-  assert.match(manifest.description, /iPadOS/i);
-  assert.match(manifest.description, /macOS/i);
+  assert.equal(manifest.name, "Obsync");
+  assert.match(manifest.description, /mobile/i);
+  assert.match(manifest.description, /desktop/i);
 });
 
 test("plugin source does not import desktop-only Node or Electron APIs", () => {

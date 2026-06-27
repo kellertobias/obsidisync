@@ -1,4 +1,4 @@
-# iOS Git Sync for Obsidian
+# Obsync for Obsidian
 
 This project contains:
 

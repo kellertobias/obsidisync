@@ -5,7 +5,7 @@ import { createClientId } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 import { FileVersionsModal } from "./versionModal";
 
-export default class IosGitSyncPlugin extends Plugin {
+export default class ObsyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
   private gitService: GitService;
   private timer: number | null = null;
@@ -71,7 +71,7 @@ export default class IosGitSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const loaded = (await this.loadData()) as Partial<IosGitSyncSettings> & { authToken?: string; vaultId?: string };
+    const loaded = ((await this.loadData()) ?? {}) as Partial<IosGitSyncSettings> & { authToken?: string; vaultId?: string };
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
     if (!this.settings.oidcAccessToken && loaded.authToken) {
       this.settings.oidcAccessToken = loaded.authToken;
