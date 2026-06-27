@@ -30,22 +30,36 @@ test("file history view shows sync status, last save, source device, and sync ac
   assert.match(viewSource, /"Local changes not synced"/);
   assert.match(viewSource, /"Last saved"/);
   assert.match(viewSource, /"Source"/);
-  assert.match(viewSource, /"Synced versions"/);
   assert.match(viewSource, /gitService\.sync\(\)/);
   assert.match(viewSource, /extractSyncDevice/);
+  assert.doesNotMatch(viewSource, /"Refresh history"/);
+  assert.doesNotMatch(viewSource, /renderHeader/);
+  assert.doesNotMatch(viewSource, /"Synced versions"/);
 });
 
-test("file history view opens versions read-only in rendered or markdown mode", () => {
+test("file history view opens selected versions with the regular Obsidian file UI", () => {
   const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
 
   assert.match(viewSource, /gitService\.history\(this\.filePath\)/);
   assert.match(viewSource, /gitService\.fileAtVersion\(this\.filePath, entry\.hash\)/);
-  assert.match(viewSource, /MarkdownRenderer\.render/);
-  assert.match(viewSource, /"Rendered"/);
-  assert.match(viewSource, /"Markdown"/);
-  assert.match(viewSource, /textarea\.readOnly = true/);
-  assert.match(viewSource, /navigator\.clipboard\.writeText/);
+  assert.match(viewSource, /HISTORY_SNAPSHOT_DIR = "\.obsidian-git-sync\/history"/);
+  assert.match(viewSource, /createBinary\(path, content\)/);
+  assert.match(viewSource, /modifyBinary\(existing, content\)/);
+  assert.match(viewSource, /openFile\(snapshot/);
+  assert.match(viewSource, /isHistorySnapshotPath/);
+  assert.doesNotMatch(viewSource, /MarkdownRenderer\.render/);
+  assert.doesNotMatch(viewSource, /"Rendered"/);
+  assert.doesNotMatch(viewSource, /"Markdown"/);
+  assert.doesNotMatch(viewSource, /textarea\.readOnly = true/);
+  assert.doesNotMatch(viewSource, /navigator\.clipboard\.writeText/);
   assert.doesNotMatch(viewSource, /Replace current file/);
   assert.doesNotMatch(viewSource, /Restore binary file/);
-  assert.doesNotMatch(viewSource, /vault\.adapter\.write/);
+});
+
+test("file history list aligns date left and source device right", () => {
+  const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
+
+  assert.match(viewSource, /row\.style\.gridTemplateColumns = "minmax\(0, 1fr\) minmax\(80px, auto\)"/);
+  assert.match(viewSource, /dateEl\.style\.fontWeight = "700"/);
+  assert.match(viewSource, /deviceEl\.style\.textAlign = "right"/);
 });

@@ -1,19 +1,13 @@
-import { ItemView, MarkdownRenderer, MarkdownView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
+import { ItemView, MarkdownView, Notice, setIcon, TFile, WorkspaceLeaf } from "obsidian";
 import { base64ToArrayBuffer } from "./base64";
 import { GitService } from "./gitService";
-import { HistoryEntry, VersionFileResponse } from "./protocol";
+import { HistoryEntry } from "./protocol";
 import { sha256Hex } from "./vaultState";
 
 export const FILE_HISTORY_VIEW_TYPE = "obsync-file-history";
+const HISTORY_SNAPSHOT_DIR = ".obsidian-git-sync/history";
 
-type PreviewMode = "rendered" | "markdown";
 type SyncState = "up-to-date" | "local-changes" | "server-newer" | "not-synced" | "unknown";
-
-interface LoadedVersion {
-  entry: HistoryEntry;
-  version: VersionFileResponse;
-  text: string | null;
-}
 
 interface FileSyncStatus {
   state: SyncState;
@@ -32,9 +26,8 @@ interface VersionSource {
 export class FileHistoryView extends ItemView {
   private filePath: string | null = null;
   private history: HistoryEntry[] = [];
-  private loadedVersion: LoadedVersion | null = null;
   private fileStatus: FileSyncStatus | null = null;
-  private previewMode: PreviewMode = "rendered";
+  private selectedHash: string | null = null;
   private requestId = 0;
   private syncing = false;
 
@@ -58,16 +51,15 @@ export class FileHistoryView extends ItemView {
   }
 
   protected async onOpen(): Promise<void> {
-    this.addAction("refresh-cw", "Refresh history", () => this.refresh());
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
-        if (file) void this.showFile(file.path);
+        if (file && !isHistorySnapshotPath(file.path)) void this.showFile(file.path);
       })
     );
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
         const view = leaf?.view;
-        if (view instanceof MarkdownView && view.file) void this.showFile(view.file.path);
+        if (view instanceof MarkdownView && view.file && !isHistorySnapshotPath(view.file.path)) void this.showFile(view.file.path);
       })
     );
     await this.refreshCurrentFile();
@@ -75,7 +67,7 @@ export class FileHistoryView extends ItemView {
 
   async refreshCurrentFile(): Promise<void> {
     const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-    if (file) {
+    if (file && !isHistorySnapshotPath(file.path)) {
       await this.showFile(file.path);
       return;
     }
@@ -89,7 +81,7 @@ export class FileHistoryView extends ItemView {
     }
     this.filePath = path;
     this.history = [];
-    this.loadedVersion = null;
+    this.selectedHash = null;
     this.fileStatus = null;
     await this.refresh();
   }
@@ -99,7 +91,6 @@ export class FileHistoryView extends ItemView {
     const { contentEl } = this;
     contentEl.empty();
     this.applyLayoutStyles(contentEl);
-    this.renderHeader(contentEl);
 
     if (!this.filePath) {
       contentEl.createEl("p", { text: "Open a Markdown file to view its history." });
@@ -109,16 +100,8 @@ export class FileHistoryView extends ItemView {
     const statusEl = contentEl.createDiv();
     this.renderStatus(statusEl, null);
 
-    const body = contentEl.createDiv();
-    body.style.display = "grid";
-    body.style.gridTemplateColumns = "repeat(auto-fit, minmax(240px, 1fr))";
-    body.style.gap = "12px";
-    body.style.minHeight = "0";
-
-    const listEl = body.createDiv();
+    const listEl = contentEl.createDiv();
     listEl.style.minWidth = "0";
-    const previewEl = body.createDiv();
-    previewEl.style.minWidth = "0";
 
     listEl.createEl("p", { text: "Loading history..." });
     try {
@@ -128,7 +111,6 @@ export class FileHistoryView extends ItemView {
       if (currentRequest !== this.requestId) return;
       this.renderStatus(statusEl, this.fileStatus);
       this.renderHistoryList(listEl);
-      await this.renderPreview(previewEl);
     } catch (error) {
       if (currentRequest !== this.requestId) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -141,35 +123,7 @@ export class FileHistoryView extends ItemView {
       });
       listEl.empty();
       listEl.createEl("p", { text: `Could not load history: ${message}` });
-      previewEl.empty();
     }
-  }
-
-  private renderHeader(container: HTMLElement): void {
-    const header = container.createDiv();
-    header.style.display = "flex";
-    header.style.alignItems = "center";
-    header.style.justifyContent = "space-between";
-    header.style.gap = "8px";
-    header.style.marginBottom = "12px";
-
-    const titleWrap = header.createDiv();
-    titleWrap.style.minWidth = "0";
-    titleWrap.createEl("h2", { text: "File history" }).style.margin = "0";
-    const pathEl = titleWrap.createEl("div", { text: this.filePath ?? "No active file" });
-    pathEl.style.fontSize = "12px";
-    pathEl.style.opacity = "0.75";
-    pathEl.style.overflow = "hidden";
-    pathEl.style.textOverflow = "ellipsis";
-    pathEl.style.whiteSpace = "nowrap";
-
-    const refreshButton = header.createEl("button", { attr: { type: "button", "aria-label": "Refresh history" } });
-    refreshButton.style.width = "32px";
-    refreshButton.style.height = "32px";
-    refreshButton.style.display = "grid";
-    refreshButton.style.placeItems = "center";
-    setIcon(refreshButton, "refresh-cw");
-    refreshButton.onclick = () => this.refresh();
   }
 
   private renderStatus(container: HTMLElement, status: FileSyncStatus | null): void {
@@ -238,8 +192,6 @@ export class FileHistoryView extends ItemView {
 
   private renderHistoryList(container: HTMLElement): void {
     container.empty();
-    const listTitle = container.createEl("h3", { text: "Synced versions" });
-    listTitle.style.marginTop = "0";
 
     if (this.history.length === 0) {
       container.createEl("p", { text: "No synced versions for this file yet." });
@@ -252,54 +204,51 @@ export class FileHistoryView extends ItemView {
     list.style.maxHeight = "62vh";
     list.style.overflow = "auto";
 
-    for (const [index, entry] of this.history.slice(0, 80).entries()) {
+    for (const entry of this.history.slice(0, 80)) {
       const source = this.describeSource(entry);
       const button = list.createEl("button", { attr: { type: "button" } });
       button.style.textAlign = "left";
       button.style.padding = "9px";
       button.style.border = "1px solid var(--background-modifier-border)";
       button.style.borderRadius = "6px";
-      button.style.background = this.loadedVersion?.entry.hash === entry.hash ? "var(--background-modifier-hover)" : "transparent";
+      button.style.background = this.selectedHash === entry.hash ? "var(--background-modifier-hover)" : "transparent";
       button.style.cursor = "pointer";
       button.style.width = "100%";
 
       const row = button.createDiv();
-      row.style.display = "flex";
+      row.style.display = "grid";
+      row.style.gridTemplateColumns = "minmax(0, 1fr) minmax(80px, auto)";
       row.style.alignItems = "center";
-      row.style.justifyContent = "space-between";
-      row.style.gap = "8px";
-      row.createEl("div", { text: formatDate(entry.date) }).style.fontWeight = "700";
-      if (index === 0) {
-        const badge = row.createEl("span", { text: "Latest" });
-        badge.style.fontSize = "11px";
-        badge.style.padding = "1px 6px";
-        badge.style.border = "1px solid var(--background-modifier-border)";
-        badge.style.borderRadius = "999px";
-        badge.style.color = "var(--text-muted)";
-      }
+      row.style.gap = "12px";
+      const dateEl = row.createEl("div", { text: formatDate(entry.date) });
+      dateEl.style.fontWeight = "700";
+      dateEl.style.overflow = "hidden";
+      dateEl.style.textOverflow = "ellipsis";
+      dateEl.style.whiteSpace = "nowrap";
+      const deviceEl = row.createEl("div", { text: source.device });
+      deviceEl.style.fontSize = "12px";
+      deviceEl.style.color = "var(--text-muted)";
+      deviceEl.style.textAlign = "right";
+      deviceEl.style.overflow = "hidden";
+      deviceEl.style.textOverflow = "ellipsis";
+      deviceEl.style.whiteSpace = "nowrap";
+      deviceEl.title = source.label;
 
-      const sourceRow = button.createDiv();
-      sourceRow.style.display = "flex";
-      sourceRow.style.alignItems = "center";
-      sourceRow.style.gap = "6px";
-      sourceRow.style.marginTop = "4px";
-      sourceRow.style.fontSize = "12px";
-      sourceRow.style.color = "var(--text-muted)";
-      setIcon(sourceRow.createEl("span"), sourceIcon(source.relation));
-      sourceRow.createEl("span", { text: source.label });
-
-      button.onclick = () => this.loadVersion(entry);
+      button.onclick = () => this.openVersion(entry);
     }
   }
 
-  private async loadVersion(entry: HistoryEntry): Promise<void> {
+  private async openVersion(entry: HistoryEntry): Promise<void> {
     if (!this.filePath) return;
     const currentRequest = ++this.requestId;
     try {
       const version = await this.gitService.fileAtVersion(this.filePath, entry.hash);
       if (currentRequest !== this.requestId) return;
       const content = base64ToArrayBuffer(version.contentBase64);
-      this.loadedVersion = { entry, version, text: decodeTextIfPossible(content) };
+      this.selectedHash = entry.hash;
+      const snapshot = await this.writeVersionSnapshot(entry, content);
+      const leaf = this.app.workspace.getLeaf("tab");
+      await leaf.openFile(snapshot, { active: true, state: { mode: "preview" } });
       await this.refresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -307,74 +256,25 @@ export class FileHistoryView extends ItemView {
     }
   }
 
-  private async renderPreview(container: HTMLElement): Promise<void> {
-    container.empty();
-    const title = container.createEl("h3", { text: "Preview" });
-    title.style.marginTop = "0";
-
-    if (!this.loadedVersion) {
-      container.createEl("p", { text: "Select a synced version to preview it read-only." });
-      return;
+  private async writeVersionSnapshot(entry: HistoryEntry, content: ArrayBuffer): Promise<TFile> {
+    await this.ensureSnapshotFolder();
+    const path = snapshotPath(this.filePath ?? "version", entry);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.app.vault.modifyBinary(existing, content);
+      return existing;
     }
-
-    const { entry, version, text } = this.loadedVersion;
-    const source = this.describeSource(entry);
-    const toolbar = container.createDiv();
-    toolbar.style.display = "flex";
-    toolbar.style.flexWrap = "wrap";
-    toolbar.style.gap = "6px";
-    toolbar.style.alignItems = "center";
-    toolbar.style.marginBottom = "8px";
-
-    toolbar.createEl("span", { text: `${formatDate(entry.date)} - ${source.label}` }).style.fontSize = "12px";
-    this.renderModeButton(toolbar, "rendered", "Rendered");
-    this.renderModeButton(toolbar, "markdown", "Markdown");
-
-    const copyButton = toolbar.createEl("button", { attr: { type: "button" } });
-    copyButton.style.display = "inline-flex";
-    copyButton.style.alignItems = "center";
-    copyButton.style.gap = "6px";
-    setIcon(copyButton.createEl("span"), "copy");
-    copyButton.createEl("span", { text: text === null ? "Copy base64" : "Copy" });
-    copyButton.onclick = async () => {
-      await navigator.clipboard.writeText(text ?? version.contentBase64);
-      new Notice(text === null ? "Version content copied as base64" : "Version text copied");
-    };
-
-    const preview = container.createDiv();
-    preview.style.border = "1px solid var(--background-modifier-border)";
-    preview.style.borderRadius = "6px";
-    preview.style.padding = "12px";
-    preview.style.maxHeight = "62vh";
-    preview.style.overflow = "auto";
-
-    if (text === null) {
-      preview.createEl("p", { text: "This version is binary and cannot be rendered as Markdown." });
-      preview.createEl("p", { text: `${version.sha256} - ${version.contentBase64.length} base64 characters` });
-      return;
-    }
-
-    if (this.previewMode === "markdown") {
-      const textarea = preview.createEl("textarea");
-      textarea.value = text;
-      textarea.readOnly = true;
-      textarea.style.width = "100%";
-      textarea.style.minHeight = "52vh";
-      textarea.style.resize = "vertical";
-      textarea.style.fontFamily = "var(--font-monospace)";
-      return;
-    }
-
-    await MarkdownRenderer.render(this.app, text, preview, this.filePath ?? version.path, this);
+    return this.app.vault.createBinary(path, content);
   }
 
-  private renderModeButton(container: HTMLElement, mode: PreviewMode, label: string): void {
-    const button = container.createEl("button", { text: label, attr: { type: "button" } });
-    button.style.fontWeight = this.previewMode === mode ? "700" : "400";
-    button.onclick = async () => {
-      this.previewMode = mode;
-      await this.refresh();
-    };
+  private async ensureSnapshotFolder(): Promise<void> {
+    let current = "";
+    for (const part of HISTORY_SNAPSHOT_DIR.split("/")) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current, true))) {
+        await this.app.vault.createFolder(current);
+      }
+    }
   }
 
   private async computeFileStatus(): Promise<FileSyncStatus> {
@@ -486,16 +386,6 @@ export class FileHistoryView extends ItemView {
   }
 }
 
-function decodeTextIfPossible(buffer: ArrayBuffer): string | null {
-  const bytes = new Uint8Array(buffer);
-  if (bytes.includes(0)) return null;
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    return null;
-  }
-}
-
 function extractSyncDevice(subject: string): string | null {
   const trimmed = subject.trim();
   if (trimmed === "sync: server pending") return "Server";
@@ -526,13 +416,6 @@ function isServerSource(device: string): boolean {
   return normalized === "server" || normalized === "server pending";
 }
 
-function sourceIcon(relation: VersionSource["relation"]): string {
-  if (relation === "server") return "server";
-  if (relation === "this") return "monitor-check";
-  if (relation === "other") return "monitor";
-  return "circle-help";
-}
-
 function statusColor(state: SyncState): string {
   if (state === "up-to-date") return "var(--color-green)";
   if (state === "local-changes") return "var(--color-orange)";
@@ -550,4 +433,26 @@ function formatDate(date: string): string {
 function formatDateFromMs(timestamp: number): string {
   if (!Number.isFinite(timestamp) || timestamp <= 0) return "Unknown";
   return new Date(timestamp).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function snapshotPath(originalPath: string, entry: HistoryEntry): string {
+  const name = sanitizeSnapshotName(originalPath);
+  return `${HISTORY_SNAPSHOT_DIR}/${entry.hash.slice(0, 12)}-${name}`;
+}
+
+function sanitizeSnapshotName(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  const fallback = normalized || "version.md";
+  return fallback
+    .split("/")
+    .filter(Boolean)
+    .join(" - ")
+    .replace(/[\0:*?"<>|]/g, "-")
+    .replace(/\s+/g, " ")
+    .slice(0, 120);
+}
+
+function isHistorySnapshotPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");
+  return normalized === HISTORY_SNAPSHOT_DIR || normalized.startsWith(`${HISTORY_SNAPSHOT_DIR}/`);
 }
