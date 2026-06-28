@@ -85,6 +85,7 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
 
 export class IosGitSyncSettingTab extends PluginSettingTab {
   plugin: ObsyncPlugin;
+  private serverRefreshRequest = 0;
 
   constructor(app: App, plugin: ObsyncPlugin) {
     super(app, plugin);
@@ -95,8 +96,8 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    new Setting(containerEl)
-      .setName("Sync server URL")
+    const serverUrlSetting = new Setting(containerEl)
+      .setName(syncServerUrlName(this.plugin.settings))
       .setDesc("Your self-hosted server, for example https://sync.example.com.")
       .addText((text) =>
         text
@@ -107,6 +108,7 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+    this.refreshServerVersionOnLoad(serverUrlSetting);
 
     new Setting(containerEl)
       .setName("Login")
@@ -250,6 +252,26 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
         })
       );
   }
+
+  private refreshServerVersionOnLoad(setting: Setting): void {
+    if (!this.plugin.settings.serverUrl || !this.plugin.settings.oidcAccessToken) return;
+
+    const request = ++this.serverRefreshRequest;
+    void this.plugin
+      .refreshConnectionStatus()
+      .then(() => {
+        if (request !== this.serverRefreshRequest) return;
+        setting.setName(syncServerUrlName(this.plugin.settings));
+      })
+      .catch(() => {
+        if (request !== this.serverRefreshRequest) return;
+        setting.setName(syncServerUrlName(this.plugin.settings));
+      });
+  }
+}
+
+function syncServerUrlName(settings: IosGitSyncSettings): string {
+  return settings.serverVersion ? `Sync server URL - server ${settings.serverVersion}` : "Sync server URL";
 }
 
 function syncStatusDescription(settings: IosGitSyncSettings): string {

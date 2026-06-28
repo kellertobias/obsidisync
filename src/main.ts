@@ -5,7 +5,7 @@ import { ConflictResolverModal } from "./conflictResolverModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
-import { SyncConflict } from "./protocol";
+import { ServerInfoResponse, SyncConflict } from "./protocol";
 import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 import { sha256Hex } from "./vaultState";
@@ -161,12 +161,17 @@ export default class ObsyncPlugin extends Plugin {
 
   checkConnection(): void {
     this.runCommand(async () => {
-      const info = await this.gitService.checkServerCompatibility();
-      if (this.settings.oidcAccessToken) {
-        await this.gitService.loadAuthenticatedUser();
-      }
+      const info = await this.refreshConnectionStatus();
       new Notice(`Obsync server ${info.version} is reachable`);
     });
+  }
+
+  async refreshConnectionStatus(): Promise<ServerInfoResponse> {
+    const info = await this.gitService.checkServerCompatibility();
+    if (this.settings.oidcAccessToken) {
+      await this.gitService.loadAuthenticatedUser();
+    }
+    return info;
   }
 
   resetSyncTimer(): void {

@@ -8,6 +8,7 @@ const root = process.cwd();
 test("plugin records persistent sync health and compatibility state", () => {
   const settingsSource = readFileSync(join(root, "src", "settings.ts"), "utf8");
   const serviceSource = readFileSync(join(root, "src", "gitService.ts"), "utf8");
+  const mainSource = readFileSync(join(root, "src", "main.ts"), "utf8");
   const protocolSource = readFileSync(join(root, "src", "protocol.ts"), "utf8");
 
   assert.match(protocolSource, /interface ServerInfoResponse/);
@@ -18,6 +19,9 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(settingsSource, /serverVersion: string \| null/);
   assert.match(settingsSource, /oidcRefreshToken: string/);
   assert.match(settingsSource, /oidcAccessTokenExpiresAt: string \| null/);
+  assert.match(settingsSource, /refreshServerVersionOnLoad\(serverUrlSetting\)/);
+  assert.match(settingsSource, /Sync server URL - server/);
+  assert.match(mainSource, /refreshConnectionStatus\(\): Promise<ServerInfoResponse>/);
   assert.match(serviceSource, /CLIENT_API_VERSION = 1/);
   assert.match(serviceSource, /checkServerCompatibility\(\): Promise<ServerInfoResponse>/);
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
