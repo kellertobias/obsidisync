@@ -5,6 +5,7 @@ import { ConflictResolverModal } from "./conflictResolverModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
+import { SyncConflict } from "./protocol";
 import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 
@@ -34,7 +35,9 @@ export default class ObsyncPlugin extends Plugin {
     }
     if (shouldSaveSettings) await this.saveSettings();
 
-    this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings());
+    this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings(), (conflicts) =>
+      this.openConflictResolver(conflicts)
+    );
 
     this.registerView(
       FILE_HISTORY_VIEW_TYPE,
@@ -97,7 +100,7 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({
       id: "resolve-current-conflict-file",
       name: "Open conflict resolver",
-      callback: () => new ConflictResolverModal(this.app, this.gitService).open()
+      callback: () => this.openConflictResolver()
     });
 
     this.resetSyncTimer();
@@ -162,8 +165,12 @@ export default class ObsyncPlugin extends Plugin {
   private async syncNow(): Promise<void> {
     const conflicts = await this.gitService.sync();
     if (conflicts.length > 0) {
-      new ConflictResolverModal(this.app, this.gitService, conflicts).open();
+      this.openConflictResolver(conflicts);
     }
+  }
+
+  private openConflictResolver(conflicts: SyncConflict[] = []): void {
+    new ConflictResolverModal(this.app, this.gitService, conflicts).open();
   }
 
   private snapshotReference(path: string): HistorySnapshotReference | null {

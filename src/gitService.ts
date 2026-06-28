@@ -21,6 +21,7 @@ import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./sec
 import { sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
+type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
 const MAIN_BRANCH = "main";
 
 export interface OidcDeviceAuthorization {
@@ -67,7 +68,8 @@ export class GitService {
   constructor(
     private readonly vault: Vault,
     private settings: IosGitSyncSettings,
-    private readonly saveSettings: SaveSettings
+    private readonly saveSettings: SaveSettings,
+    private readonly onConflictNotice?: ConflictNoticeHandler
   ) {}
 
   updateSettings(settings: IosGitSyncSettings): void {
@@ -147,7 +149,7 @@ export class GitService {
       await vaultState.applyServerFiles(response.files);
 
       if (response.status === "conflict") {
-        new Notice(`Git sync conflict in ${response.conflicts.length} file(s). Choose a resolution for each file.`, 15000);
+        this.showConflictNotice(response.conflicts);
         return response.conflicts;
       }
 
@@ -427,6 +429,27 @@ export class GitService {
 
   private deviceName(): string {
     return getDeviceName(this.settings.deviceName);
+  }
+
+  private showConflictNotice(conflicts: SyncConflict[]): void {
+    const notice = new Notice(`Git sync conflict in ${conflicts.length} file(s). Click to choose a resolution.`, 15000);
+    if (!this.onConflictNotice) return;
+
+    notice.messageEl.style.cursor = "pointer";
+    notice.messageEl.title = "Open conflict resolver";
+    notice.messageEl.tabIndex = 0;
+
+    const openResolver = () => {
+      notice.hide();
+      this.onConflictNotice?.(conflicts);
+    };
+    notice.messageEl.onclick = openResolver;
+    notice.messageEl.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openResolver();
+      }
+    };
   }
 }
 
