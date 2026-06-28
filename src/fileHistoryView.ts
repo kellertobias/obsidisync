@@ -513,6 +513,18 @@ export class FileHistoryView extends ItemView {
         this.app.vault.adapter.readBinary(this.filePath),
         this.gitService.fileAtVersion(this.filePath, latest.hash)
       ]);
+      const localSha = await sha256Hex(localBuffer);
+      if (localSha === latestVersion.sha256) {
+        return {
+          state: "up-to-date",
+          title: "Up to date",
+          detail: "The open file matches the latest synced version.",
+          lastSaved: latestSaved,
+          source: latestSource.label,
+          hasConflict
+        };
+      }
+
       const latestTime = Date.parse(latest.date);
       const localIsNewer = file && !Number.isNaN(latestTime) && file.stat.mtime > latestTime + 1000;
       if (localIsNewer) {
@@ -522,18 +534,6 @@ export class FileHistoryView extends ItemView {
           detail: `Latest synced version: ${latestSaved} from ${latestSource.label}.`,
           lastSaved: localSaved,
           source: currentSource,
-          hasConflict
-        };
-      }
-
-      const localSha = await sha256Hex(localBuffer);
-      if (localSha === latestVersion.sha256) {
-        return {
-          state: "up-to-date",
-          title: "Up to date",
-          detail: "The open file matches the latest synced version.",
-          lastSaved: latestSaved,
-          source: latestSource.label,
           hasConflict
         };
       }

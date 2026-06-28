@@ -40,6 +40,7 @@ test("file history view shows sync status, last save, source device, and sync ac
   assert.match(viewSource, /this\.app\.vault\.on\("modify"/);
   assert.match(viewSource, /file\.path !== this\.filePath/);
   assert.match(viewSource, /if \(localIsNewer\)/);
+  assert.match(viewSource, /if \(localSha === latestVersion\.sha256\)[\s\S]*?title: "Up to date"[\s\S]*?const latestTime = Date\.parse\(latest\.date\)/);
   assert.match(viewSource, /"Last saved"/);
   assert.match(viewSource, /"Source"/);
   assert.match(viewSource, /gitService\.sync\(\)/);

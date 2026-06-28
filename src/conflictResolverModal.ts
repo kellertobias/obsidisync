@@ -213,7 +213,7 @@ export class ConflictResolverModal extends Modal {
     hunkList.style.overflow = "auto";
 
     parsed.hunks.forEach((hunk, index) => {
-      this.renderHunkEditor(hunkList, hunk, index, resolutions[index]);
+      this.renderHunkEditor(hunkList, path, parsed, hunk, index, resolutions, resolutions[index]);
     });
 
     this.statusEl = contentEl.createEl("p", { text: "" });
@@ -225,7 +225,15 @@ export class ConflictResolverModal extends Modal {
     });
   }
 
-  private renderHunkEditor(container: HTMLElement, hunk: ConflictHunk, index: number, resolution: HunkResolution): void {
+  private renderHunkEditor(
+    container: HTMLElement,
+    path: string,
+    parsed: ParsedConflictDocument,
+    hunk: ConflictHunk,
+    index: number,
+    resolutions: HunkResolution[],
+    resolution: HunkResolution
+  ): void {
     const item = container.createDiv();
     item.style.border = "1px solid var(--background-modifier-border)";
     item.style.borderRadius = "8px";
@@ -236,12 +244,6 @@ export class ConflictResolverModal extends Modal {
     title.style.fontWeight = "700";
     title.style.marginBottom = "8px";
 
-    const controls = item.createDiv();
-    controls.style.display = "flex";
-    controls.style.flexDirection = "column";
-    controls.style.gap = "8px";
-    controls.style.marginBottom = "8px";
-
     const textarea = item.createEl("textarea");
     textarea.value = hunk.server;
     textarea.style.width = "100%";
@@ -249,37 +251,61 @@ export class ConflictResolverModal extends Modal {
     textarea.style.resize = "vertical";
     textarea.style.fontFamily = "var(--font-monospace)";
 
+    const editedActions = item.createDiv();
+    editedActions.style.display = "none";
+    editedActions.style.marginTop = "8px";
+    const editedButton = this.createStackButton(editedActions, "Use edited version", () => {
+      resolution.choice = "custom";
+      resolution.custom = textarea.value;
+      void this.resolveCustom(path, parsed, resolutions);
+    });
+
     const setChoice = (choice: ConflictChoice, value: string) => {
       resolution.choice = choice;
       resolution.custom = value;
       textarea.value = value;
+      editedActions.style.display = "none";
     };
 
-    this.createStackButton(controls, "Use server version", () => setChoice("server", hunk.server));
-    this.createStackButton(controls, "Use local version", () => setChoice("local", hunk.local));
-    this.createStackButton(controls, "Edit text", () => {
-      resolution.choice = "custom";
-      textarea.focus();
-    });
     textarea.oninput = () => {
       resolution.choice = "custom";
       resolution.custom = textarea.value;
+      editedActions.style.display = "block";
+      editedButton.disabled = false;
     };
 
-    this.renderSideBySide(item, hunk);
+    this.renderSideBySide(
+      item,
+      hunk,
+      () => {
+        setChoice("server", hunk.server);
+        void this.resolveCustom(path, parsed, resolutions);
+      },
+      () => {
+        setChoice("local", hunk.local);
+        void this.resolveCustom(path, parsed, resolutions);
+      }
+    );
   }
 
-  private renderSideBySide(container: HTMLElement, hunk: ConflictHunk): void {
+  private renderSideBySide(
+    container: HTMLElement,
+    hunk: ConflictHunk,
+    useServer: () => void,
+    useLocal: () => void
+  ): void {
     const grid = container.createDiv();
     grid.style.display = "grid";
     grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(220px, 1fr))";
     grid.style.gap = "8px";
     grid.style.marginTop = "8px";
-    this.renderPreview(grid, "Server", hunk.server);
-    this.renderPreview(grid, "Local", hunk.local);
+    const server = this.renderPreview(grid, "Server", hunk.server);
+    this.createStackButton(server, "Use server version", useServer);
+    const local = this.renderPreview(grid, "Local", hunk.local);
+    this.createStackButton(local, "Use local version", useLocal);
   }
 
-  private renderPreview(container: HTMLElement, label: string, text: string): void {
+  private renderPreview(container: HTMLElement, label: string, text: string): HTMLElement {
     const wrap = container.createDiv();
     wrap.style.minWidth = "0";
     const title = wrap.createEl("div", { text: label });
@@ -294,6 +320,7 @@ export class ConflictResolverModal extends Modal {
     pre.style.background = "var(--background-primary)";
     pre.style.border = "1px solid var(--background-modifier-border)";
     pre.style.whiteSpace = "pre-wrap";
+    return wrap;
   }
 
   private async resolveParsed(path: string, parsed: ParsedConflictDocument, choice: Exclude<ConflictChoice, "custom">): Promise<void> {
@@ -314,7 +341,7 @@ export class ConflictResolverModal extends Modal {
   private async submitResolution(path: string, content: string): Promise<void> {
     if (this.resolving) return;
     this.resolving = true;
-    this.setStatus("Pushing resolution...");
+    this.renderProgress(path, "Pushing resolution...");
     try {
       await this.gitService.resolveTextFile(path, content);
       new Notice(`Resolved ${path}`);
@@ -334,7 +361,7 @@ export class ConflictResolverModal extends Modal {
   private async resolveCurrentFile(path: string): Promise<void> {
     if (this.resolving) return;
     this.resolving = true;
-    this.setStatus("Pushing resolution...");
+    this.renderProgress(path, "Pushing resolution...");
     try {
       await this.gitService.resolveFile(path);
       new Notice(`Resolved ${path}`);
@@ -349,6 +376,13 @@ export class ConflictResolverModal extends Modal {
     } finally {
       this.resolving = false;
     }
+  }
+
+  private renderProgress(path: string, message: string): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: path });
+    this.statusEl = contentEl.createEl("p", { text: message });
   }
 
   private setStatus(message: string): void {
