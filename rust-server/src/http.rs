@@ -48,6 +48,7 @@ enum PublicAuthConfigResponse {
     },
     Oidc {
         issuer: String,
+        #[serde(rename = "clientId")]
         client_id: String,
         scope: String,
         audience: Option<String>,
@@ -102,7 +103,7 @@ impl IntoResponse for ApiError {
 
 pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<String>) -> Router {
     let router = Router::new()
-        .route("/", get(password_page))
+        .route("/", get(home_page))
         .route("/login", get(password_page).post(password_form))
         .route("/change-feed", get(change_feed_page))
         .route(
@@ -132,6 +133,10 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
         .with_state(Arc::new(state));
 
     apply_cors(router, allowed_origins)
+}
+
+async fn home_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
+    Ok(Html(render_home_page(&state.public_auth)))
 }
 
 fn apply_cors(router: Router, allowed_origins: Vec<String>) -> Router {
@@ -194,6 +199,9 @@ struct PasswordLoginForm {
 }
 
 async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
+    if !matches!(state.public_auth, PublicAuthConfig::Password) {
+        return Ok(Html(render_home_page(&state.public_auth)));
+    }
     let configured = state.auth.password_is_configured().await?;
     Ok(Html(render_password_page(configured, None, None, &[])))
 }
@@ -203,6 +211,9 @@ async fn password_form(
     headers: HeaderMap,
     Form(form): Form<PasswordLoginForm>,
 ) -> Result<Response, ApiError> {
+    if !matches!(state.public_auth, PublicAuthConfig::Password) {
+        return Err(ApiError(anyhow::anyhow!("password login is not enabled")));
+    }
     let configured = state.auth.password_is_configured().await?;
     let result = if configured {
         state
@@ -307,6 +318,67 @@ async fn auth_config(
         PublicAuthConfig::Token => PublicAuthConfigResponse::Token,
     };
     Ok(Json(response))
+}
+
+fn render_home_page(public_auth: &PublicAuthConfig) -> String {
+    let auth_line = match public_auth {
+        PublicAuthConfig::Password => "Password login is enabled. Open /login to sign in.",
+        PublicAuthConfig::Oidc { issuer, .. } => {
+            return format!(
+                r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OBSync</title>
+<style>
+:root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
+main {{ width: min(720px, calc(100vw - 32px)); padding: 2rem 0; }}
+h1 {{ font-size: 1.7rem; margin: 0 0 0.75rem; }}
+p {{ line-height: 1.5; color: color-mix(in srgb, CanvasText 76%, transparent); }}
+code {{ font: 0.95em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+</style>
+</head>
+<body>
+<main>
+<h1>OBSync</h1>
+<p>This sync server is running and uses Zitadel OIDC for plugin login.</p>
+<p>Issuer: <code>{}</code></p>
+<p>Use the Obsidian plugin login button to start device authorization.</p>
+</main>
+</body>
+</html>"#,
+                escape_html(issuer)
+            );
+        }
+        PublicAuthConfig::Token => "Static token authentication is enabled.",
+    };
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OBSync</title>
+<style>
+:root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
+main {{ width: min(720px, calc(100vw - 32px)); padding: 2rem 0; }}
+h1 {{ font-size: 1.7rem; margin: 0 0 0.75rem; }}
+p {{ line-height: 1.5; color: color-mix(in srgb, CanvasText 76%, transparent); }}
+</style>
+</head>
+<body>
+<main>
+<h1>OBSync</h1>
+<p>{}</p>
+</main>
+</body>
+</html>"#,
+        escape_html(auth_line)
+    )
 }
 
 async fn auth_session(

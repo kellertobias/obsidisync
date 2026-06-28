@@ -57,7 +57,10 @@ impl RuntimeConfig {
         let (auth, public_auth) = if let Ok(token) = std::env::var("OBSIDIAN_GIT_SYNC_DEV_TOKEN") {
             let user =
                 std::env::var("OBSIDIAN_GIT_SYNC_DEV_USER").unwrap_or_else(|_| "dev".to_string());
-            (AuthVerifier::StaticTokenForDev { token, user }, PublicAuthConfig::Token)
+            (
+                AuthVerifier::StaticTokenForDev { token, user },
+                PublicAuthConfig::Token,
+            )
         } else if let Some(user) = password_user_env() {
             (
                 AuthVerifier::password(user, data_dir.clone())?,
@@ -71,15 +74,14 @@ impl RuntimeConfig {
                 .unwrap_or_else(|_| "preferred_username".to_string());
             let client_id = std::env::var("OIDC_DEVICE_CLIENT_ID")
                 .or_else(|_| std::env::var("OIDC_CLIENT_ID"))
-                .map_err(|_| anyhow::anyhow!("OIDC_DEVICE_CLIENT_ID is required for plugin login in OIDC mode"))?;
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "OIDC_DEVICE_CLIENT_ID is required for plugin login in OIDC mode"
+                    )
+                })?;
             let scope = std::env::var("OIDC_DEVICE_SCOPE")
                 .unwrap_or_else(|_| "openid profile email".to_string());
-            let auth = AuthVerifier::oidc(
-                issuer.clone(),
-                audience.clone(),
-                jwks_url,
-                user_claim,
-            )?;
+            let auth = AuthVerifier::oidc(issuer.clone(), audience.clone(), jwks_url, user_claim)?;
             (
                 auth,
                 PublicAuthConfig::Oidc {

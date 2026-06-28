@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createClientId, getDeviceName } from "../src/runtime";
+import { createClientId, generateComputerName, getDeviceName } from "../src/runtime";
 
 test("createClientId uses crypto.randomUUID when available", () => {
   assert.equal(createClientId({ randomUUID: () => "11111111-2222-4333-8444-555555555555" }), "11111111-2222-4333-8444-555555555555");
@@ -26,4 +26,16 @@ test("getDeviceName falls back through platform, user agent, and generic label",
   assert.equal(getDeviceName("", { platform: "iPhone", userAgent: "ignored" }), "iPhone");
   assert.equal(getDeviceName("", { platform: "", userAgent: "ObsidianMobile/1.0" }), "ObsidianMobile/1.0");
   assert.equal(getDeviceName("", { platform: "", userAgent: "" }), "Obsidian device");
+});
+
+test("generateComputerName creates stable-format Mac and iPhone names", () => {
+  const cryptoSource = {
+    getRandomValues: (array: Uint8Array) => {
+      array[0] = 2;
+      return array;
+    }
+  };
+
+  assert.equal(generateComputerName(cryptoSource, { platform: "MacIntel" }), "Mac-Fox");
+  assert.equal(generateComputerName(cryptoSource, { platform: "iPhone" }), "iPhone-Fox");
 });

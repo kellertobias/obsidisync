@@ -11,6 +11,8 @@ test("plugin exposes a dedicated computer name command and setting", () => {
   const settingsSource = readFileSync(join(root, "src", "settings.ts"), "utf8");
 
   assert.match(mainSource, /ComputerNameModal/);
+  assert.match(mainSource, /generateComputerName/);
+  assert.match(mainSource, /this\.settings\.deviceName = generateComputerName\(\)/);
   assert.match(mainSource, /id: "set-computer-name"/);
   assert.match(mainSource, /name: "Set computer name"/);
   assert.match(mainSource, /this\.settings\.deviceName = name/);

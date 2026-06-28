@@ -8,6 +8,19 @@ interface RuntimeNavigator {
   userAgent?: string;
 }
 
+const DEVICE_NAME_ANIMALS = [
+  "Badger",
+  "Falcon",
+  "Fox",
+  "Hawk",
+  "Lynx",
+  "Otter",
+  "Panda",
+  "Raven",
+  "Seal",
+  "Wolf"
+];
+
 export function createClientId(cryptoSource: RuntimeCrypto | undefined = globalThis.crypto): string {
   if (cryptoSource?.randomUUID) return cryptoSource.randomUUID();
 
@@ -46,6 +59,15 @@ export function getDeviceName(
   return "Obsidian device";
 }
 
+export function generateComputerName(
+  cryptoSource: RuntimeCrypto | undefined = globalThis.crypto,
+  navigatorSource: RuntimeNavigator | undefined = globalThis.navigator
+): string {
+  const prefix = detectDevicePrefix(navigatorSource);
+  const animal = DEVICE_NAME_ANIMALS[randomIndex(DEVICE_NAME_ANIMALS.length, cryptoSource)];
+  return `${prefix}-${animal}`;
+}
+
 export function slugFromName(name: string | undefined, fallback: string): string {
   const slug = (name ?? "")
     .trim()
@@ -54,6 +76,23 @@ export function slugFromName(name: string | undefined, fallback: string): string
     .replace(/^-+|-+$/g, "")
     .slice(0, 96);
   return slug || fallback;
+}
+
+function detectDevicePrefix(navigatorSource: RuntimeNavigator | undefined): "Mac" | "iPhone" {
+  const platform = navigatorSource?.platform?.toLowerCase() ?? "";
+  const userAgent = navigatorSource?.userAgent?.toLowerCase() ?? "";
+  if (platform.includes("iphone") || userAgent.includes("iphone")) return "iPhone";
+  return "Mac";
+}
+
+function randomIndex(length: number, cryptoSource: RuntimeCrypto | undefined): number {
+  const bytes = new Uint8Array(1);
+  if (cryptoSource?.getRandomValues) {
+    cryptoSource.getRandomValues(bytes);
+  } else {
+    fillWithMathRandom(bytes);
+  }
+  return bytes[0] % length;
 }
 
 function toHex(bytes: Uint8Array): string {

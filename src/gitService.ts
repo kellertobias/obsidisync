@@ -20,6 +20,7 @@ import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./sec
 import { sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
+const MAIN_BRANCH = "main";
 
 export interface OidcDeviceAuthorization {
   device_code: string;
@@ -224,9 +225,14 @@ export class GitService {
       await sleep(interval * 1000);
 
       const params = new URLSearchParams();
+      const config = await this.serverOidcLoginConfig();
       params.set("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
       params.set("device_code", deviceCode);
-      params.set("client_id", (await this.serverOidcLoginConfig()).clientId);
+      params.set("client_id", config.clientId);
+      if (config.audience) {
+        params.set("audience", config.audience);
+        params.set("resource", config.audience);
+      }
 
       const response = await requestUrl({
         url: discovery.token_endpoint,
@@ -263,12 +269,12 @@ export class GitService {
   private async register(): Promise<void> {
     const request: RegisterRequest = {
       remoteUrl: this.settings.remoteUrl.trim(),
-      branch: this.settings.branch,
+      branch: MAIN_BRANCH,
       authorName: this.settings.authorName,
       authorEmail: this.settings.authorEmail
     };
-    const response = await this.postJson<RegisterResponse>(`${this.vaultPath()}/register`, request);
-    this.settings.branch = response.branch;
+    await this.postJson<RegisterResponse>(`${this.vaultPath()}/register`, request);
+    this.settings.branch = MAIN_BRANCH;
     await this.saveSettings();
   }
 
@@ -396,11 +402,11 @@ export class GitService {
     if (!this.settings.oidcAccessToken) throw new Error("Set an access token before syncing");
     if (!this.settings.userSlug) throw new Error("Set a user namespace before syncing");
     if (!this.settings.vaultSlug) throw new Error("Set a vault namespace before syncing");
-    if (!this.settings.branch) throw new Error("Set a branch before syncing");
+    this.settings.branch = MAIN_BRANCH;
     assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
     assertNamespaceSlug(this.settings.userSlug, "User namespace");
     assertNamespaceSlug(this.settings.vaultSlug, "Vault namespace");
-    assertGitBranch(this.settings.branch);
+    assertGitBranch(MAIN_BRANCH);
     if (/\s/.test(this.settings.oidcAccessToken)) throw new Error("Access token must not contain whitespace");
     if (this.settings.remoteUrl && (this.settings.remoteUrl.length > 2048 || /[\s\0]/.test(this.settings.remoteUrl))) {
       throw new Error("Git remote URL is invalid");

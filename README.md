@@ -255,17 +255,15 @@ Configure:
 - Click **Log in**. The plugin fetches public auth settings from the server and stores the access token automatically.
 - Vault name, e.g. `personal`. This defaults to the Obsidian vault name.
 - Author name/email
-- Optional computer name
+- Computer name, generated automatically on install and editable if needed.
 - Sync on startup and sync interval
 
 Advanced settings:
 
 - Access token, only for static-token development servers or recovery.
 - User namespace, normally set automatically from the authenticated server user.
-- Git remote URL, optional.
-- Branch.
 
-The Git remote URL is used only by the server. Leave it blank to use only the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`. SSH works if the server's native Git/SSH environment is configured.
+The plugin always registers vaults on the `main` branch and uses the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`.
 
 ### Login flow
 

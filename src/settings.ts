@@ -108,28 +108,6 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Git remote URL")
-      .setDesc("Optional. Leave blank to keep a server-local Git repository in the server data directory.")
-      .addText((text) =>
-        text
-          .setPlaceholder("optional")
-          .setValue(this.plugin.settings.remoteUrl)
-          .onChange(async (value) => {
-            this.plugin.settings.remoteUrl = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Branch")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.branch).onChange(async (value) => {
-          this.plugin.settings.branch = value.trim() || "main";
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
       .setName("Author name")
       .addText((text) =>
         text.setValue(this.plugin.settings.authorName).onChange(async (value) => {

@@ -4,7 +4,7 @@ import { ComputerNameModal } from "./computerNameModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
-import { createClientId, slugFromName } from "./runtime";
+import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 
 export default class ObsyncPlugin extends Plugin {
@@ -14,14 +14,24 @@ export default class ObsyncPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    let shouldSaveSettings = false;
     if (!this.settings.clientId) {
       this.settings.clientId = createClientId();
-      await this.saveSettings();
+      shouldSaveSettings = true;
     }
     if (!this.settings.vaultSlug) {
       this.settings.vaultSlug = slugFromName(this.app.vault.getName(), "personal");
-      await this.saveSettings();
+      shouldSaveSettings = true;
     }
+    if (!this.settings.deviceName) {
+      this.settings.deviceName = generateComputerName();
+      shouldSaveSettings = true;
+    }
+    if (this.settings.branch !== DEFAULT_SETTINGS.branch) {
+      this.settings.branch = DEFAULT_SETTINGS.branch;
+      shouldSaveSettings = true;
+    }
+    if (shouldSaveSettings) await this.saveSettings();
 
     this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings());
 
@@ -110,6 +120,7 @@ export default class ObsyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const loaded = ((await this.loadData()) ?? {}) as Partial<IosGitSyncSettings> & { authToken?: string; vaultId?: string };
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
+    this.settings.branch = DEFAULT_SETTINGS.branch;
     if (!this.settings.oidcAccessToken && loaded.authToken) {
       this.settings.oidcAccessToken = loaded.authToken;
     }
