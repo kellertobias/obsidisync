@@ -90,6 +90,12 @@ export class FileHistoryView extends ItemView {
         }
       })
     );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (!(file instanceof TFile) || file.path !== this.filePath) return;
+        void this.refresh();
+      })
+    );
     await this.refreshCurrentFile();
   }
 
@@ -507,6 +513,19 @@ export class FileHistoryView extends ItemView {
         this.app.vault.adapter.readBinary(this.filePath),
         this.gitService.fileAtVersion(this.filePath, latest.hash)
       ]);
+      const latestTime = Date.parse(latest.date);
+      const localIsNewer = file && !Number.isNaN(latestTime) && file.stat.mtime > latestTime + 1000;
+      if (localIsNewer) {
+        return {
+          state: "local-changes",
+          title: "File changed",
+          detail: `Latest synced version: ${latestSaved} from ${latestSource.label}.`,
+          lastSaved: localSaved,
+          source: currentSource,
+          hasConflict
+        };
+      }
+
       const localSha = await sha256Hex(localBuffer);
       if (localSha === latestVersion.sha256) {
         return {
@@ -515,19 +534,6 @@ export class FileHistoryView extends ItemView {
           detail: "The open file matches the latest synced version.",
           lastSaved: latestSaved,
           source: latestSource.label,
-          hasConflict
-        };
-      }
-
-      const latestTime = Date.parse(latest.date);
-      const localIsNewer = file && !Number.isNaN(latestTime) && file.stat.mtime > latestTime + 1000;
-      if (localIsNewer) {
-        return {
-          state: "local-changes",
-          title: "Local changes not synced",
-          detail: `Latest synced version: ${latestSaved} from ${latestSource.label}.`,
-          lastSaved: localSaved,
-          source: currentSource,
           hasConflict
         };
       }

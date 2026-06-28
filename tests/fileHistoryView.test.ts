@@ -36,7 +36,10 @@ test("file history view shows sync status, last save, source device, and sync ac
   assert.match(mainSource, /lastSyncedAt: \(\) => this\.settings\.lastSyncedAt/);
   assert.match(viewSource, /sha256Hex/);
   assert.match(viewSource, /"Up to date"/);
-  assert.match(viewSource, /"Local changes not synced"/);
+  assert.match(viewSource, /"File changed"/);
+  assert.match(viewSource, /this\.app\.vault\.on\("modify"/);
+  assert.match(viewSource, /file\.path !== this\.filePath/);
+  assert.match(viewSource, /if \(localIsNewer\)/);
   assert.match(viewSource, /"Last saved"/);
   assert.match(viewSource, /"Source"/);
   assert.match(viewSource, /gitService\.sync\(\)/);
