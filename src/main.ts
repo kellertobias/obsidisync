@@ -17,6 +17,9 @@ export default class ObsyncPlugin extends Plugin {
   private conflictResolverOpen = false;
   private mobileSyncIndicatorEl: HTMLElement | null = null;
   private mobileSyncIndicatorRequestId = 0;
+  private lastActiveFilePath: string | null = null;
+  private pendingCloseSyncPaths = new Set<string>();
+  private appCloseSyncStarted = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -65,6 +68,7 @@ export default class ObsyncPlugin extends Plugin {
     this.addRibbonIcon("refresh-cw", "Sync vault", () => this.runCommand(() => this.syncNow()));
     this.addRibbonIcon("history", "Open file history", () => this.openFileHistoryView());
     this.setupMobileSyncIndicator();
+    this.setupSyncOnClose();
 
     this.addCommand({
       id: "sync-now",
@@ -223,6 +227,76 @@ export default class ObsyncPlugin extends Plugin {
     window.setTimeout(() => update(), 0);
   }
 
+  private setupSyncOnClose(): void {
+    this.app.workspace.onLayoutReady(() => {
+      this.lastActiveFilePath = this.currentMarkdownFilePath();
+    });
+
+    this.registerEvent(
+      this.app.workspace.on("file-open", (file) => {
+        this.handleActiveFilePathChange(file?.path ?? null);
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        window.setTimeout(() => this.handleActiveFilePathChange(this.currentMarkdownFilePath()), 0);
+      })
+    );
+
+    const syncCurrentFile = () => this.syncCurrentFileBeforeAppClose();
+    const syncWhenHidden = () => {
+      if (document.visibilityState === "hidden") syncCurrentFile();
+    };
+
+    window.addEventListener("pagehide", syncCurrentFile);
+    document.addEventListener("visibilitychange", syncWhenHidden);
+    this.register(() => {
+      window.removeEventListener("pagehide", syncCurrentFile);
+      document.removeEventListener("visibilitychange", syncWhenHidden);
+    });
+  }
+
+  private currentMarkdownFilePath(): string | null {
+    return this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ?? null;
+  }
+
+  private handleActiveFilePathChange(nextPath: string | null): void {
+    const previousPath = this.lastActiveFilePath;
+    this.lastActiveFilePath = nextPath;
+    if (previousPath && previousPath !== nextPath) {
+      this.scheduleSyncClosedFile(previousPath);
+    }
+  }
+
+  private scheduleSyncClosedFile(path: string): void {
+    if (this.pendingCloseSyncPaths.has(path)) return;
+    this.pendingCloseSyncPaths.add(path);
+    window.setTimeout(() => {
+      this.pendingCloseSyncPaths.delete(path);
+      void this.syncPathIfChanged(path);
+    }, 300);
+  }
+
+  private syncCurrentFileBeforeAppClose(): void {
+    if (this.appCloseSyncStarted) return;
+    const path = this.lastActiveFilePath ?? this.currentMarkdownFilePath();
+    if (!path) return;
+
+    this.appCloseSyncStarted = true;
+    void this.syncPathIfChanged(path).finally(() => {
+      this.appCloseSyncStarted = false;
+    });
+  }
+
+  private async syncPathIfChanged(path: string): Promise<void> {
+    try {
+      if (!(await this.fileHasLocalChanges(path))) return;
+      await this.runCommand(() => this.syncNow());
+    } catch (error) {
+      console.error("Obsync close sync failed", error);
+    }
+  }
+
   private updateMobileSyncIndicator(): void {
     if (!Platform.isMobile) return;
 
@@ -243,7 +317,7 @@ export default class ObsyncPlugin extends Plugin {
     try {
       const savedState = await this.mobileFileSavedState(path);
       if (requestId !== this.mobileSyncIndicatorRequestId) return;
-      const label = formatMobileSyncDate(this.settings.lastSyncedAt);
+      const label = savedState === "changes" ? "Changed" : formatMobileSyncDate(this.settings.lastSyncedAt);
       this.clearMobileSyncIndicator(indicator);
       indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row", text: label });
       indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row obsync-mobile-sync-indicator-state", text: savedState });
@@ -259,12 +333,18 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   private async mobileFileSavedState(path: string): Promise<"saved" | "changes"> {
+    return (await this.fileHasLocalChanges(path)) ? "changes" : "saved";
+  }
+
+  private async fileHasLocalChanges(path: string): Promise<boolean> {
     const syncedEntry = this.settings.localManifest.find((entry) => entry.path === path);
-    if (!syncedEntry) return "changes";
+    const exists = await this.app.vault.adapter.exists(path, true);
+    if (!exists) return Boolean(syncedEntry);
+    if (!syncedEntry) return true;
 
     const buffer = await this.app.vault.adapter.readBinary(path);
     const currentSha = await sha256Hex(buffer);
-    return currentSha === syncedEntry.sha256 ? "saved" : "changes";
+    return currentSha !== syncedEntry.sha256;
   }
 
   private hideMobileSyncIndicator(indicator: HTMLElement): void {
