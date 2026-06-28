@@ -13,6 +13,7 @@ export default class ObsyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
   private gitService: GitService;
   private timer: number | null = null;
+  private conflictResolverOpen = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -35,8 +36,12 @@ export default class ObsyncPlugin extends Plugin {
     }
     if (shouldSaveSettings) await this.saveSettings();
 
-    this.gitService = new GitService(this.app.vault, this.settings, () => this.saveSettings(), (conflicts) =>
-      this.openConflictResolver(conflicts)
+    this.gitService = new GitService(
+      this.app.vault,
+      this.settings,
+      () => this.saveSettings(),
+      (conflicts) => this.openConflictResolver(conflicts),
+      () => (this.conflictResolverOpen ? "Finish conflict resolution before starting another sync." : null)
     );
 
     this.registerView(
@@ -141,6 +146,10 @@ export default class ObsyncPlugin extends Plugin {
     }).open();
   }
 
+  isSyncRunning(): boolean {
+    return this.gitService?.isSyncRunning() ?? false;
+  }
+
   resetSyncTimer(): void {
     if (this.timer !== null) {
       window.clearInterval(this.timer);
@@ -170,7 +179,14 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   private openConflictResolver(conflicts: SyncConflict[] = []): void {
-    new ConflictResolverModal(this.app, this.gitService, conflicts).open();
+    if (this.conflictResolverOpen) {
+      new Notice("Conflict resolver is already open");
+      return;
+    }
+    this.conflictResolverOpen = true;
+    new ConflictResolverModal(this.app, this.gitService, conflicts, () => {
+      this.conflictResolverOpen = false;
+    }).open();
   }
 
   private snapshotReference(path: string): HistorySnapshotReference | null {

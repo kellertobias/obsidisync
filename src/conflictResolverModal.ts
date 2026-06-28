@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting, TFile } from "obsidian";
+import { App, Modal, Notice, TFile } from "obsidian";
 import { buildResolvedText, ConflictHunk, ParsedConflictDocument, parseConflictDocument } from "./conflictParser";
 import { GitService } from "./gitService";
 import { SyncConflict } from "./protocol";
@@ -18,12 +18,16 @@ interface HunkResolution {
 export class ConflictResolverModal extends Modal {
   private conflicts: ConflictFile[] = [];
   private statusEl: HTMLElement | null = null;
+  private syncStateEl: HTMLElement | null = null;
+  private unsubscribeSyncState: (() => void) | null = null;
+  private syncRunning = false;
   private resolving = false;
 
   constructor(
     app: App,
     private readonly gitService: GitService,
-    initialConflicts: SyncConflict[] = []
+    initialConflicts: SyncConflict[] = [],
+    private readonly onClosed?: () => void
   ) {
     super(app);
     this.conflicts = initialConflicts.map((conflict) => ({
@@ -34,8 +38,18 @@ export class ConflictResolverModal extends Modal {
 
   async onOpen(): Promise<void> {
     this.modalEl.style.width = "min(900px, 96vw)";
+    this.unsubscribeSyncState = this.gitService.onSyncStateChange((running) => {
+      this.syncRunning = running;
+      this.updateSyncStatus();
+    });
     await this.loadConflicts();
     this.renderFileList();
+  }
+
+  onClose(): void {
+    this.unsubscribeSyncState?.();
+    this.unsubscribeSyncState = null;
+    this.onClosed?.();
   }
 
   private async loadConflicts(): Promise<void> {
@@ -68,10 +82,12 @@ export class ConflictResolverModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: "Resolve sync conflicts" });
+    this.renderSyncStatus(contentEl);
 
     if (this.conflicts.length === 0) {
       contentEl.createEl("p", { text: "No conflict markers were found in this vault." });
-      new Setting(contentEl).addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
+      const actions = this.createButtonStack(contentEl);
+      this.createStackButton(actions, "Close", () => this.close());
       return;
     }
 
@@ -148,12 +164,13 @@ export class ConflictResolverModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: path });
+    this.renderSyncStatus(contentEl);
     contentEl.createEl("p", { text: errorMessage(error) });
     contentEl.createEl("p", { text: "Edit the file manually, then push the current file content as the resolution." });
-    new Setting(contentEl)
-      .addButton((button) => button.setButtonText("Back").onClick(() => this.renderFileList()))
-      .addButton((button) => button.setButtonText("Use current file content").onClick(() => void this.resolveCurrentFile(path)))
-      .addButton((button) => button.setButtonText("Close").onClick(() => this.close()));
+    const actions = this.createButtonStack(contentEl);
+    this.createStackButton(actions, "Back", () => this.renderFileList());
+    this.createStackButton(actions, "Use current file content", () => void this.resolveCurrentFile(path), { primary: true });
+    this.createStackButton(actions, "Close", () => this.close());
     this.statusEl = contentEl.createEl("p", { text: "" });
   }
 
@@ -161,25 +178,16 @@ export class ConflictResolverModal extends Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h2", { text: path });
+    this.renderSyncStatus(contentEl);
     contentEl.createEl("p", {
       text: `${parsed.hunks.length} conflicted change${parsed.hunks.length === 1 ? "" : "s"}`
     });
 
-    new Setting(contentEl)
-      .addButton((button) =>
-        button
-          .setButtonText("Use server version")
-          .setDisabled(this.resolving)
-          .onClick(() => void this.resolveParsed(path, parsed, "server"))
-      )
-      .addButton((button) =>
-        button
-          .setButtonText("Use local version")
-          .setDisabled(this.resolving)
-          .onClick(() => void this.resolveParsed(path, parsed, "local"))
-      )
-      .addButton((button) => button.setCta().setButtonText("Merge").onClick(() => this.renderMerge(path, parsed)))
-      .addButton((button) => button.setButtonText("Back").onClick(() => this.renderFileList()));
+    const actions = this.createButtonStack(contentEl);
+    this.createStackButton(actions, "Use server version", () => void this.resolveParsed(path, parsed, "server"), { disabled: this.resolving });
+    this.createStackButton(actions, "Use local version", () => void this.resolveParsed(path, parsed, "local"), { disabled: this.resolving });
+    this.createStackButton(actions, "Merge", () => this.renderMerge(path, parsed), { primary: true });
+    this.createStackButton(actions, "Back", () => this.renderFileList());
 
     this.renderPreview(contentEl, "Server version", buildResolvedText(parsed, () => ({ side: "server" })));
     this.renderPreview(contentEl, "Local version", buildResolvedText(parsed, () => ({ side: "local" })));
@@ -195,6 +203,7 @@ export class ConflictResolverModal extends Modal {
 
     contentEl.empty();
     contentEl.createEl("h2", { text: path });
+    this.renderSyncStatus(contentEl);
 
     const hunkList = contentEl.createDiv();
     hunkList.style.display = "flex";
@@ -208,15 +217,12 @@ export class ConflictResolverModal extends Modal {
     });
 
     this.statusEl = contentEl.createEl("p", { text: "" });
-    new Setting(contentEl)
-      .addButton((button) => button.setButtonText("Back").onClick(() => this.renderFileActions(path, parsed)))
-      .addButton((button) =>
-        button
-          .setCta()
-          .setButtonText("Apply merge")
-          .setDisabled(this.resolving)
-          .onClick(() => void this.resolveCustom(path, parsed, resolutions))
-      );
+    const actions = this.createButtonStack(contentEl);
+    this.createStackButton(actions, "Back", () => this.renderFileActions(path, parsed));
+    this.createStackButton(actions, "Apply merge", () => void this.resolveCustom(path, parsed, resolutions), {
+      disabled: this.resolving,
+      primary: true
+    });
   }
 
   private renderHunkEditor(container: HTMLElement, hunk: ConflictHunk, index: number, resolution: HunkResolution): void {
@@ -232,7 +238,7 @@ export class ConflictResolverModal extends Modal {
 
     const controls = item.createDiv();
     controls.style.display = "flex";
-    controls.style.flexWrap = "wrap";
+    controls.style.flexDirection = "column";
     controls.style.gap = "8px";
     controls.style.marginBottom = "8px";
 
@@ -249,12 +255,12 @@ export class ConflictResolverModal extends Modal {
       textarea.value = value;
     };
 
-    controls.createEl("button", { text: "Use server version", attr: { type: "button" } }).onclick = () => setChoice("server", hunk.server);
-    controls.createEl("button", { text: "Use local version", attr: { type: "button" } }).onclick = () => setChoice("local", hunk.local);
-    controls.createEl("button", { text: "Edit text", attr: { type: "button" } }).onclick = () => {
+    this.createStackButton(controls, "Use server version", () => setChoice("server", hunk.server));
+    this.createStackButton(controls, "Use local version", () => setChoice("local", hunk.local));
+    this.createStackButton(controls, "Edit text", () => {
       resolution.choice = "custom";
       textarea.focus();
-    };
+    });
     textarea.oninput = () => {
       resolution.choice = "custom";
       resolution.custom = textarea.value;
@@ -347,6 +353,43 @@ export class ConflictResolverModal extends Modal {
 
   private setStatus(message: string): void {
     if (this.statusEl) this.statusEl.setText(message);
+  }
+
+  private renderSyncStatus(container: HTMLElement): void {
+    this.syncStateEl = container.createEl("p");
+    this.syncStateEl.style.fontWeight = "600";
+    this.updateSyncStatus();
+  }
+
+  private updateSyncStatus(): void {
+    if (!this.syncStateEl) return;
+    this.syncStateEl.setText(this.syncRunning ? "Sync is running..." : "No sync is running.");
+    this.syncStateEl.style.color = this.syncRunning ? "var(--text-accent)" : "var(--text-muted)";
+  }
+
+  private createButtonStack(container: HTMLElement): HTMLElement {
+    const actions = container.createDiv();
+    actions.style.display = "flex";
+    actions.style.flexDirection = "column";
+    actions.style.gap = "8px";
+    actions.style.margin = "12px 0";
+    return actions;
+  }
+
+  private createStackButton(
+    container: HTMLElement,
+    text: string,
+    onClick: () => void,
+    options: { disabled?: boolean; primary?: boolean } = {}
+  ): HTMLButtonElement {
+    const button = container.createEl("button", { text, attr: { type: "button" } });
+    button.disabled = Boolean(options.disabled);
+    button.style.width = "100%";
+    button.style.minHeight = "36px";
+    button.style.textAlign = "center";
+    if (options.primary) button.addClass("mod-cta");
+    button.onclick = onClick;
+    return button;
   }
 }
 

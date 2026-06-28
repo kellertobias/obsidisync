@@ -68,6 +68,13 @@ export class FileHistoryView extends ItemView {
   }
 
   protected async onOpen(): Promise<void> {
+    this.register(
+      this.gitService.onSyncStateChange((running) => {
+        if (this.syncing === running) return;
+        this.syncing = running;
+        void this.refresh();
+      })
+    );
     this.registerEvent(
       this.app.workspace.on("file-open", (file) => {
         void this.showFile(file?.path ?? null);
@@ -180,6 +187,13 @@ export class FileHistoryView extends ItemView {
     const title = textWrap.createEl("div", { text: status?.title ?? "Checking sync status..." });
     title.style.fontWeight = "700";
     title.style.fontSize = "15px";
+    if (this.syncing) {
+      const running = textWrap.createEl("div", { text: "Sync is running..." });
+      running.style.fontSize = "12px";
+      running.style.marginTop = "2px";
+      running.style.color = "var(--text-accent)";
+      running.style.fontWeight = "600";
+    }
     if (status?.detail) {
       const detail = textWrap.createEl("div", { text: status.detail });
       detail.style.fontSize = "12px";
@@ -539,16 +553,11 @@ export class FileHistoryView extends ItemView {
   }
 
   private async syncNow(): Promise<void> {
-    if (this.syncing) return;
-    this.syncing = true;
-    await this.refresh();
+    if (this.gitService.isSyncRunning()) return;
     try {
       await this.gitService.sync();
     } catch {
       // GitService already shows a Notice with the failure reason.
-    } finally {
-      this.syncing = false;
-      await this.refresh();
     }
   }
 

@@ -22,6 +22,8 @@ import { sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
 type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
+type SyncStateListener = (running: boolean) => void;
+type SyncBlocker = () => string | null;
 const MAIN_BRANCH = "main";
 
 export interface OidcDeviceAuthorization {
@@ -61,6 +63,7 @@ interface AuthSessionResponse {
 
 export class GitService {
   private running = false;
+  private syncStateListeners = new Set<SyncStateListener>();
   private oidcDiscoveryCache: OidcDiscovery | null = null;
   private oidcLoginConfig: Extract<ServerAuthConfig, { type: "oidc" }> | null = null;
   private oidcLoginServerUrl: string | null = null;
@@ -69,7 +72,8 @@ export class GitService {
     private readonly vault: Vault,
     private settings: IosGitSyncSettings,
     private readonly saveSettings: SaveSettings,
-    private readonly onConflictNotice?: ConflictNoticeHandler
+    private readonly onConflictNotice?: ConflictNoticeHandler,
+    private readonly syncBlocker?: SyncBlocker
   ) {}
 
   updateSettings(settings: IosGitSyncSettings): void {
@@ -83,6 +87,18 @@ export class GitService {
 
   currentDeviceName(): string {
     return this.deviceName();
+  }
+
+  isSyncRunning(): boolean {
+    return this.running;
+  }
+
+  onSyncStateChange(listener: SyncStateListener): () => void {
+    this.syncStateListeners.add(listener);
+    listener(this.running);
+    return () => {
+      this.syncStateListeners.delete(listener);
+    };
   }
 
   async authConfig(): Promise<ServerAuthConfig> {
@@ -129,6 +145,12 @@ export class GitService {
   }
 
   async sync(): Promise<SyncConflict[]> {
+    const blockReason = this.syncBlocker?.();
+    if (blockReason) {
+      new Notice(blockReason);
+      return [];
+    }
+
     const conflicts = await this.exclusive(async () => {
       this.requireConfigured();
       await this.register();
@@ -396,6 +418,7 @@ export class GitService {
     }
 
     this.running = true;
+    this.emitSyncState();
     try {
       return await operation();
     } catch (error) {
@@ -404,6 +427,7 @@ export class GitService {
       throw error;
     } finally {
       this.running = false;
+      this.emitSyncState();
     }
   }
 
@@ -450,6 +474,12 @@ export class GitService {
         openResolver();
       }
     };
+  }
+
+  private emitSyncState(): void {
+    for (const listener of this.syncStateListeners) {
+      listener(this.running);
+    }
   }
 }
 

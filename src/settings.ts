@@ -138,6 +138,10 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Sync" });
 
     new Setting(containerEl)
+      .setName("Sync status")
+      .setDesc(this.plugin.isSyncRunning() ? "Sync is running." : "No sync is running.");
+
+    new Setting(containerEl)
       .setName("Sync on startup")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.syncOnStartup).onChange(async (value) => {
