@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Platform, Plugin } from "obsidian";
+import { MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
 import { ConflictResolverModal } from "./conflictResolverModal";
@@ -60,7 +60,8 @@ export default class ObsyncPlugin extends Plugin {
           saveVersionName: (sourcePath, hash, name) => this.saveVersionName(sourcePath, hash, name),
           isVersionSquashed: (sourcePath, hash) => Boolean(this.versionMetadata(sourcePath, hash)?.squashedIntoHash),
           squashVersion: (sourcePath, hash, intoHash) => this.squashVersion(sourcePath, hash, intoHash),
-          lastSyncedAt: () => this.settings.lastSyncedAt
+          lastSyncedAt: () => this.settings.lastSyncedAt,
+          openConflictResolver: () => this.openConflictResolver()
         })
     );
 
@@ -158,6 +159,16 @@ export default class ObsyncPlugin extends Plugin {
     return this.gitService?.isSyncRunning() ?? false;
   }
 
+  checkConnection(): void {
+    this.runCommand(async () => {
+      const info = await this.gitService.checkServerCompatibility();
+      if (this.settings.oidcAccessToken) {
+        await this.gitService.loadAuthenticatedUser();
+      }
+      new Notice(`Obsync server ${info.version} is reachable`);
+    });
+  }
+
   resetSyncTimer(): void {
     if (this.timer !== null) {
       window.clearInterval(this.timer);
@@ -187,6 +198,7 @@ export default class ObsyncPlugin extends Plugin {
       .obsync-mobile-sync-indicator {
         align-items: center;
         color: var(--text-muted);
+        cursor: pointer;
         display: none;
         flex-direction: column;
         flex: 0 0 auto;
@@ -223,6 +235,13 @@ export default class ObsyncPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => update()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => update()));
     this.registerEvent(this.app.workspace.on("file-open", () => update()));
+    this.registerEvent(this.app.vault.on("create", (file) => this.updateMobileSyncIndicatorForPath(file.path)));
+    this.registerEvent(this.app.vault.on("modify", (file) => this.updateMobileSyncIndicatorForPath(file.path)));
+    this.registerEvent(this.app.vault.on("delete", (file) => this.updateMobileSyncIndicatorForPath(file.path)));
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      this.updateMobileSyncIndicatorForPath(file.path);
+      this.updateMobileSyncIndicatorForPath(oldPath);
+    }));
     this.app.workspace.onLayoutReady(() => update());
     window.setTimeout(() => update(), 0);
   }
@@ -306,6 +325,11 @@ export default class ObsyncPlugin extends Plugin {
     void this.refreshMobileFileSyncIndicator(indicator);
   }
 
+  private updateMobileSyncIndicatorForPath(path: string): void {
+    if (path !== this.currentMarkdownFilePath()) return;
+    window.setTimeout(() => this.updateMobileSyncIndicator(), 50);
+  }
+
   private async refreshMobileFileSyncIndicator(indicator: HTMLElement): Promise<void> {
     const requestId = ++this.mobileSyncIndicatorRequestId;
     const path = this.app.workspace.getActiveViewOfType(MarkdownView)?.file?.path ?? null;
@@ -371,7 +395,16 @@ export default class ObsyncPlugin extends Plugin {
     this.mobileSyncIndicatorEl?.remove();
     const indicator = document.createElement("div");
     indicator.className = "obsync-mobile-sync-indicator";
+    indicator.tabIndex = 0;
+    indicator.setAttribute("role", "button");
     indicator.setAttribute("aria-label", "Obsync sync status");
+    indicator.onclick = (event) => {
+      void this.openSyncMenu(event);
+    };
+    indicator.onkeydown = (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      void this.openSyncMenu(event);
+    };
 
     const menuButton = container.querySelector(
       '.view-action[aria-label*="More"], .view-action.mod-more-options, .mobile-navbar-action[aria-label*="More"], [aria-label*="More options"]'
@@ -385,6 +418,62 @@ export default class ObsyncPlugin extends Plugin {
     this.mobileSyncIndicatorEl = indicator;
     this.register(() => indicator.remove());
     return indicator;
+  }
+
+  private async openSyncMenu(event: MouseEvent | KeyboardEvent): Promise<void> {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const menu = new Menu();
+    try {
+      const summary = await this.gitService.localChangeSummary();
+      menu.addItem((item) =>
+        item
+          .setTitle(`${summary.changed} changed file${summary.changed === 1 ? "" : "s"}`)
+          .setIcon(summary.changed > 0 ? "circle-alert" : "check")
+          .setDisabled(true)
+      );
+      menu.addSeparator();
+    } catch {
+      // The action menu should still open even if the local summary cannot be computed.
+    }
+
+    menu.addItem((item) =>
+      item
+        .setTitle("Sync now")
+        .setIcon("refresh-cw")
+        .setDisabled(this.isSyncRunning())
+        .onClick(() => this.runCommand(() => this.syncNow()))
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Open file history")
+        .setIcon("history")
+        .onClick(() => {
+          void this.openFileHistoryView();
+        })
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Resolve conflicts")
+        .setIcon("git-pull-request")
+        .onClick(() => this.openConflictResolver())
+    );
+    menu.addSeparator();
+    menu.addItem((item) =>
+      item
+        .setTitle("Log in to Obsync")
+        .setIcon("log-in")
+        .onClick(() => this.openLoginModal())
+    );
+
+    if (event instanceof MouseEvent) {
+      menu.showAtMouseEvent(event);
+      return;
+    }
+
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom, width: rect.width });
   }
 
   private mobileTitleActionsContainer(): HTMLElement | null {
@@ -410,7 +499,18 @@ export default class ObsyncPlugin extends Plugin {
     this.conflictResolverOpen = true;
     new ConflictResolverModal(this.app, this.gitService, conflicts, () => {
       this.conflictResolverOpen = false;
+      void this.refreshFileHistoryViews();
+      this.updateMobileSyncIndicator();
     }).open();
+  }
+
+  private async refreshFileHistoryViews(): Promise<void> {
+    for (const leaf of this.app.workspace.getLeavesOfType(FILE_HISTORY_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) {
+        await view.refresh();
+      }
+    }
   }
 
   private snapshotReference(path: string): HistorySnapshotReference | null {
@@ -485,6 +585,8 @@ export default class ObsyncPlugin extends Plugin {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("CONFLICT") || message.toLowerCase().includes("conflict")) {
         new Notice("Git conflict detected. Resolve conflict markers, then run sync again.", 15000);
+      } else {
+        new Notice(`Obsync error: ${message}`, 10000);
       }
     }
   }

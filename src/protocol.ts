@@ -119,3 +119,10 @@ export interface VersionFileResponse {
   sha256: string;
   readOnly: boolean;
 }
+
+export interface ServerInfoResponse {
+  name: string;
+  version: string;
+  apiVersion: number;
+  minClientApiVersion: number;
+}

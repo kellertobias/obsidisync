@@ -1,5 +1,6 @@
 import { Notice, requestUrl, Vault } from "obsidian";
 import { arrayBufferToBase64 } from "./base64";
+import { diffManifests } from "./manifest";
 import {
   HistoryEntry,
   RegisterRequest,
@@ -9,6 +10,7 @@ import {
   SyncRequest,
   SyncResponse,
   ManifestEntry,
+  ServerInfoResponse,
   UploadChunkResponse,
   UploadCompleteResponse,
   UploadInitRequest,
@@ -25,6 +27,7 @@ type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
 type SyncStateListener = (running: boolean) => void;
 type SyncBlocker = () => string | null;
 const MAIN_BRANCH = "main";
+const CLIENT_API_VERSION = 1;
 
 export interface OidcDeviceAuthorization {
   device_code: string;
@@ -42,6 +45,8 @@ interface OidcDiscovery {
 
 interface OidcTokenResponse {
   access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
   error?: string;
   error_description?: string;
 }
@@ -63,6 +68,7 @@ interface AuthSessionResponse {
 
 export class GitService {
   private running = false;
+  private syncQueued = false;
   private syncStateListeners = new Set<SyncStateListener>();
   private oidcDiscoveryCache: OidcDiscovery | null = null;
   private oidcLoginConfig: Extract<ServerAuthConfig, { type: "oidc" }> | null = null;
@@ -93,6 +99,16 @@ export class GitService {
     return this.running;
   }
 
+  async localChangeSummary(): Promise<{ changed: number; upserts: number; deletes: number }> {
+    const manifest = await new VaultState(this.vault).computeManifest();
+    const diff = diffManifests(manifest, this.settings.localManifest);
+    return {
+      changed: diff.upsertPaths.length + diff.deletePaths.length,
+      upserts: diff.upsertPaths.length,
+      deletes: diff.deletePaths.length
+    };
+  }
+
   onSyncStateChange(listener: SyncStateListener): () => void {
     this.syncStateListeners.add(listener);
     listener(this.running);
@@ -104,6 +120,7 @@ export class GitService {
   async authConfig(): Promise<ServerAuthConfig> {
     if (!this.settings.serverUrl) throw new Error("Set a sync server URL before logging in");
     assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
+    await this.checkServerCompatibility();
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
     const response = await requestUrl({
       url: `${serverUrl}/v1/auth/config`,
@@ -141,51 +158,81 @@ export class GitService {
 
   async loadAuthenticatedUser(): Promise<void> {
     if (!this.settings.oidcAccessToken) throw new Error("Log in before loading the authenticated user");
+    await this.checkServerCompatibility();
     const session = await this.getJson<AuthSessionResponse>("/v1/auth/session");
     this.settings.userSlug = session.user;
     await this.saveSettings();
   }
 
   async sync(): Promise<SyncConflict[]> {
+    if (this.running) {
+      this.syncQueued = true;
+      this.settings.syncStatus = "queued";
+      this.settings.lastSyncError = null;
+      await this.saveSettings();
+      this.emitSyncState();
+      new Notice("Git sync queued");
+      return [];
+    }
+
+    const collectedConflicts: SyncConflict[] = [];
+    do {
+      this.syncQueued = false;
+      const conflicts = await this.exclusive(() => this.performSync());
+      if (conflicts && conflicts.length > 0) {
+        collectedConflicts.push(...conflicts);
+        break;
+      }
+    } while (this.syncQueued);
+
+    return collectedConflicts;
+  }
+
+  private async performSync(): Promise<SyncConflict[]> {
     const blockReason = this.syncBlocker?.();
     if (blockReason) {
       new Notice(blockReason);
       return [];
     }
 
-    const conflicts = await this.exclusive(async () => {
-      this.requireConfigured();
-      await this.register();
+    this.requireConfigured();
+    await this.checkServerCompatibility();
+    await this.register();
 
-      const vaultState = new VaultState(this.vault);
-      const { manifest, changes } = await vaultState.collectChanges(this.settings.localManifest, {
-        stageUpload: (path, buffer, entry) => this.uploadBuffer(path, buffer, entry)
-      });
-      const request: SyncRequest = {
-        baseHead: this.settings.serverHead || null,
-        clientId: this.settings.clientId,
-        deviceName: this.deviceName(),
-        changes,
-        clientManifest: manifest
-      };
-
-      const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
-      await vaultState.applyServerFiles(response.files);
-
-      if (response.status === "conflict") {
-        this.showConflictNotice(response.conflicts);
-        return response.conflicts;
-      }
-
-      this.settings.serverHead = response.serverHead;
-      this.settings.lastSyncedAt = new Date().toISOString();
-      this.settings.localManifest = await vaultState.computeManifest();
-      await this.saveSettings();
-
-      new Notice(changes.length > 0 ? `Git sync complete: ${changes.length} local change(s)` : "Git sync complete");
-      return [];
+    const vaultState = new VaultState(this.vault);
+    const { manifest, changes } = await vaultState.collectChanges(this.settings.localManifest, {
+      stageUpload: (path, buffer, entry) => this.uploadBuffer(path, buffer, entry)
     });
-    return conflicts ?? [];
+    const request: SyncRequest = {
+      baseHead: this.settings.serverHead || null,
+      clientId: this.settings.clientId,
+      deviceName: this.deviceName(),
+      changes,
+      clientManifest: manifest
+    };
+
+    const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
+    await vaultState.applyServerFiles(response.files);
+
+    if (response.status === "conflict") {
+      this.settings.syncStatus = "error";
+      this.settings.lastSyncError = `Conflict in ${response.conflicts.length} file(s)`;
+      await this.saveSettings();
+      this.showConflictNotice(response.conflicts);
+      return response.conflicts;
+    }
+
+    const completedAt = new Date().toISOString();
+    this.settings.serverHead = response.serverHead;
+    this.settings.lastSyncedAt = completedAt;
+    this.settings.lastSyncCompletedAt = completedAt;
+    this.settings.lastSyncError = null;
+    this.settings.lastSyncChangeCount = changes.length;
+    this.settings.localManifest = await vaultState.computeManifest();
+    await this.saveSettings();
+
+    new Notice(changes.length > 0 ? `Git sync complete: ${changes.length} local change(s)` : "Git sync complete");
+    return [];
   }
 
   async history(path?: string): Promise<HistoryEntry[]> {
@@ -202,6 +249,7 @@ export class GitService {
   async resolveFile(path: string): Promise<void> {
     await this.exclusive(async () => {
       this.requireConfigured();
+      await this.checkServerCompatibility();
       const buffer = await this.vault.adapter.readBinary(path);
       const uploadId = await this.uploadBuffer(path, buffer);
       const request: ResolveRequest = {
@@ -214,6 +262,8 @@ export class GitService {
       await vaultState.applyServerFiles(response.files);
       this.settings.serverHead = response.serverHead;
       this.settings.lastSyncedAt = new Date().toISOString();
+      this.settings.lastSyncCompletedAt = this.settings.lastSyncedAt;
+      this.settings.lastSyncError = response.status === "conflict" ? "Conflict remains after resolve attempt" : null;
       this.settings.localManifest = await vaultState.computeManifest();
       await this.saveSettings();
       new Notice(response.status === "conflict" ? "Conflict remains after resolve attempt" : "Conflict resolution pushed");
@@ -278,8 +328,7 @@ export class GitService {
       const body = response.json as OidcTokenResponse;
 
       if (response.status >= 200 && response.status < 300 && body.access_token) {
-        this.settings.oidcAccessToken = body.access_token;
-        await this.saveSettings();
+        await this.storeOidcTokenResponse(body);
         await this.loadAuthenticatedUser();
         new Notice("OIDC login complete");
         return;
@@ -312,6 +361,80 @@ export class GitService {
     await this.saveSettings();
   }
 
+  async checkServerCompatibility(): Promise<ServerInfoResponse> {
+    if (!this.settings.serverUrl) throw new Error("Set a sync server URL before contacting the server");
+    assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    const response = await requestUrl({
+      url: `${serverUrl}/v1/server/info`,
+      method: "GET",
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(response.text || `Server compatibility check failed: HTTP ${response.status}`);
+    }
+
+    const info = response.json as ServerInfoResponse;
+    if (!Number.isFinite(info.apiVersion) || !Number.isFinite(info.minClientApiVersion)) {
+      throw new Error("Sync server did not report a valid API version");
+    }
+    if (info.minClientApiVersion > CLIENT_API_VERSION || info.apiVersion < CLIENT_API_VERSION) {
+      throw new Error(`Sync server API ${info.apiVersion} is not compatible with client API ${CLIENT_API_VERSION}`);
+    }
+
+    this.settings.serverVersion = info.version;
+    this.settings.serverApiVersion = info.apiVersion;
+    this.settings.lastServerCheckAt = new Date().toISOString();
+    await this.saveSettings();
+    return info;
+  }
+
+  private async storeOidcTokenResponse(body: OidcTokenResponse): Promise<void> {
+    if (!body.access_token) throw new Error("OIDC token response did not include an access token");
+    this.settings.oidcAccessToken = body.access_token;
+    if (body.refresh_token) {
+      this.settings.oidcRefreshToken = body.refresh_token;
+    }
+    this.settings.oidcAccessTokenExpiresAt =
+      typeof body.expires_in === "number" && Number.isFinite(body.expires_in) && body.expires_in > 0
+        ? new Date(Date.now() + body.expires_in * 1000).toISOString()
+        : null;
+    await this.saveSettings();
+  }
+
+  private async refreshOidcAccessToken(): Promise<boolean> {
+    if (!this.settings.oidcRefreshToken) return false;
+
+    const config = await this.serverOidcLoginConfig();
+    const discovery = await this.oidcDiscovery();
+    const params = new URLSearchParams();
+    params.set("grant_type", "refresh_token");
+    params.set("refresh_token", this.settings.oidcRefreshToken);
+    params.set("client_id", config.clientId);
+    if (config.audience) {
+      params.set("audience", config.audience);
+      params.set("resource", config.audience);
+    }
+
+    const response = await requestUrl({
+      url: discovery.token_endpoint,
+      method: "POST",
+      contentType: "application/x-www-form-urlencoded",
+      body: params.toString(),
+      throw: false
+    });
+    const body = response.json as OidcTokenResponse;
+    if (response.status >= 200 && response.status < 300 && body.access_token) {
+      await this.storeOidcTokenResponse(body);
+      return true;
+    }
+
+    this.settings.oidcRefreshToken = "";
+    this.settings.oidcAccessTokenExpiresAt = null;
+    await this.saveSettings();
+    return false;
+  }
+
   private async uploadBuffer(path: string, buffer: ArrayBuffer, entry?: ManifestEntry): Promise<string> {
     const sha256 = entry?.sha256 ?? (await sha256Hex(buffer));
     const initRequest: UploadInitRequest = {
@@ -340,7 +463,7 @@ export class GitService {
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
-    const response = await requestUrl({
+    let response = await requestUrl({
       url: `${serverUrl}${path}`,
       method: "POST",
       contentType: "application/json",
@@ -350,6 +473,25 @@ export class GitService {
       body: JSON.stringify(body),
       throw: false
     });
+
+    if (response.status === 401 || response.status === 403) {
+      if (await this.refreshOidcAccessToken()) {
+        response = await requestUrl({
+          url: `${serverUrl}${path}`,
+          method: "POST",
+          contentType: "application/json",
+          headers: {
+            Authorization: `Bearer ${this.settings.oidcAccessToken}`
+          },
+          body: JSON.stringify(body),
+          throw: false
+        });
+        if (response.status >= 200 && response.status < 300) {
+          return response.json as T;
+        }
+      }
+      throw new Error("Login expired or unauthorized. Log in to Obsync again.");
+    }
 
     if (response.status < 200 || response.status >= 300) {
       const text = response.text || `HTTP ${response.status}`;
@@ -361,7 +503,7 @@ export class GitService {
 
   private async getJson<T>(path: string): Promise<T> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
-    const response = await requestUrl({
+    let response = await requestUrl({
       url: `${serverUrl}${path}`,
       method: "GET",
       headers: {
@@ -369,6 +511,23 @@ export class GitService {
       },
       throw: false
     });
+
+    if (response.status === 401 || response.status === 403) {
+      if (await this.refreshOidcAccessToken()) {
+        response = await requestUrl({
+          url: `${serverUrl}${path}`,
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${this.settings.oidcAccessToken}`
+          },
+          throw: false
+        });
+        if (response.status >= 200 && response.status < 300) {
+          return response.json as T;
+        }
+      }
+      throw new Error("Login expired or unauthorized. Log in to Obsync again.");
+    }
 
     if (response.status < 200 || response.status >= 300) {
       const text = response.text || `HTTP ${response.status}`;
@@ -420,11 +579,21 @@ export class GitService {
     }
 
     this.running = true;
+    this.settings.syncStatus = "running";
+    this.settings.lastSyncAttemptAt = new Date().toISOString();
+    this.settings.lastSyncError = null;
+    await this.saveSettings();
     this.emitSyncState();
     try {
-      return await operation();
+      const result = await operation();
+      this.settings.syncStatus = this.syncQueued ? "queued" : "idle";
+      await this.saveSettings();
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.settings.syncStatus = "error";
+      this.settings.lastSyncError = message;
+      await this.saveSettings();
       new Notice(`Git sync failed: ${message}`, 10000);
       throw error;
     } finally {

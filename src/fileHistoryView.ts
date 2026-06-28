@@ -15,6 +15,7 @@ interface FileSyncStatus {
   detail: string;
   lastSaved: string;
   source: string;
+  hasConflict: boolean;
 }
 
 interface VersionSource {
@@ -37,6 +38,7 @@ export interface HistorySnapshotStore {
   isVersionSquashed(sourcePath: string, hash: string): boolean;
   squashVersion(sourcePath: string, hash: string, intoHash: string): Promise<void>;
   lastSyncedAt(): string | null;
+  openConflictResolver(): void;
 }
 
 export class FileHistoryView extends ItemView {
@@ -160,7 +162,8 @@ export class FileHistoryView extends ItemView {
         title: "Status unavailable",
         detail: message,
         lastSaved: "Unknown",
-        source: "Unknown"
+        source: "Unknown",
+        hasConflict: false
       });
       listEl.empty();
       listEl.createEl("p", { text: `Could not load history: ${message}` });
@@ -201,12 +204,27 @@ export class FileHistoryView extends ItemView {
       detail.style.color = "var(--text-muted)";
     }
 
-    const syncButton = top.createEl("button", { attr: { type: "button", "aria-label": "Sync now" } });
+    const actions = top.createDiv();
+    actions.style.display = "inline-flex";
+    actions.style.alignItems = "center";
+    actions.style.gap = "6px";
+    actions.style.flexShrink = "0";
+
+    if (status?.hasConflict) {
+      const resolveButton = actions.createEl("button", { attr: { type: "button", "aria-label": "Resolve conflicts" } });
+      resolveButton.style.display = "inline-flex";
+      resolveButton.style.alignItems = "center";
+      resolveButton.style.gap = "6px";
+      setIcon(resolveButton.createEl("span"), "git-pull-request");
+      resolveButton.createEl("span", { text: "Resolve" });
+      resolveButton.onclick = () => this.snapshots.openConflictResolver();
+    }
+
+    const syncButton = actions.createEl("button", { attr: { type: "button", "aria-label": "Sync now" } });
     syncButton.disabled = this.syncing;
     syncButton.style.display = "inline-flex";
     syncButton.style.alignItems = "center";
     syncButton.style.gap = "6px";
-    syncButton.style.flexShrink = "0";
     setIcon(syncButton.createEl("span"), "refresh-cw");
     syncButton.createEl("span", { text: this.syncing ? "Syncing" : "Sync" });
     syncButton.onclick = () => this.syncNow();
@@ -467,6 +485,7 @@ export class FileHistoryView extends ItemView {
     const file = this.currentFile();
     const localSaved = file ? formatDateFromMs(file.stat.mtime) : "Unknown";
     const currentSource = this.currentDeviceSource();
+    const hasConflict = await this.fileHasConflictMarkers(file);
 
     if (!this.filePath || this.history.length === 0) {
       return {
@@ -474,7 +493,8 @@ export class FileHistoryView extends ItemView {
         title: "Not synced yet",
         detail: "This file has no saved server version.",
         lastSaved: localSaved,
-        source: currentSource
+        source: currentSource,
+        hasConflict
       };
     }
 
@@ -494,7 +514,8 @@ export class FileHistoryView extends ItemView {
           title: "Up to date",
           detail: "The open file matches the latest synced version.",
           lastSaved: latestSaved,
-          source: latestSource.label
+          source: latestSource.label,
+          hasConflict
         };
       }
 
@@ -506,7 +527,8 @@ export class FileHistoryView extends ItemView {
           title: "Local changes not synced",
           detail: `Latest synced version: ${latestSaved} from ${latestSource.label}.`,
           lastSaved: localSaved,
-          source: currentSource
+          source: currentSource,
+          hasConflict
         };
       }
 
@@ -515,7 +537,8 @@ export class FileHistoryView extends ItemView {
         title: "Server version differs",
         detail: "Sync to update this device or resolve conflicts if both sides changed.",
         lastSaved: latestSaved,
-        source: latestSource.label
+        source: latestSource.label,
+        hasConflict
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -524,8 +547,18 @@ export class FileHistoryView extends ItemView {
         title: "Status unavailable",
         detail: message,
         lastSaved: latestSaved,
-        source: latestSource.label
+        source: latestSource.label,
+        hasConflict
       };
+    }
+  }
+
+  private async fileHasConflictMarkers(file: TFile | null): Promise<boolean> {
+    if (!file) return false;
+    try {
+      return hasConflictMarkers(await this.app.vault.cachedRead(file));
+    } catch {
+      return false;
     }
   }
 
@@ -658,6 +691,10 @@ function statusColor(state: SyncState): string {
   if (state === "server-newer") return "var(--color-yellow)";
   if (state === "not-synced") return "var(--text-accent)";
   return "var(--background-modifier-border-hover)";
+}
+
+function hasConflictMarkers(content: string): boolean {
+  return content.includes("<<<<<<<") && content.includes("=======") && content.includes(">>>>>>>");
 }
 
 function formatDate(date: string): string {

@@ -80,6 +80,41 @@ fn protocol_matches_plugin_json_field_names() {
 }
 
 #[tokio::test]
+async fn server_info_reports_api_compatibility() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        AppState {
+            vaults: VaultService::new(root.path().join("data")),
+            auth: AuthVerifier::StaticTokenForDev {
+                token: "secret".to_string(),
+                user: "alice".to_string(),
+            },
+            public_auth: PublicAuthConfig::Token,
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/server/info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["name"], "obsync-server");
+    assert_eq!(body["apiVersion"], 1);
+    assert_eq!(body["minClientApiVersion"], 1);
+    assert!(body["version"].as_str().is_some());
+}
+
+#[tokio::test]
 async fn http_authorization_rejects_cross_user_access() {
     let root = tempfile::tempdir().unwrap();
     let app = router(

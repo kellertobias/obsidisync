@@ -169,6 +169,19 @@ Rust server binary:
 rust-server/target/release/obsidian-git-sync-server
 ```
 
+## Release checklist
+
+Before tagging a plugin release:
+
+1. Run `npm run test:plugin`.
+2. Run `npm run build:plugin`.
+3. Bump `package.json`, `package-lock.json`, and `manifest.json` to the same version.
+4. Commit the source and generated `main.js`.
+5. Tag the commit as `vX.Y.Z`.
+6. Push `main` and the tag. The release workflow verifies the tag matches `manifest.json` and uploads `main.js` plus `manifest.json`.
+
+Before a v1.0.0 release, also run `npm test` so the Rust server tests and plugin tests both pass.
+
 ## Run the Rust server
 
 Production OIDC mode:
@@ -264,9 +277,26 @@ Configure:
 Advanced settings:
 
 - Access token, only for static-token development servers or recovery.
+- Refresh token, stored after OIDC login when the provider returns one.
 - User namespace, normally set automatically from the authenticated server user.
 
 The plugin always registers vaults on the `main` branch and uses the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`.
+
+The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error.
+
+### Sync status and recovery
+
+The settings page shows:
+
+- Current sync status: idle, running, queued, or error.
+- Last sync attempt.
+- Last successful sync.
+- Last sync error.
+- Server version and API version after the last compatibility check.
+
+Use the **Check** button in the Server setting to verify server compatibility and the current authenticated session without starting a sync.
+
+If a sync is requested while another sync is running, Obsync queues one follow-up sync and runs it immediately after the current sync finishes. If the server returns `401` or `403`, Obsync attempts one OIDC refresh-token exchange when a refresh token is available. If refresh fails or no refresh token exists, log in again from Obsync settings.
 
 ### Login flow
 
@@ -305,6 +335,41 @@ The server uses:
 
 If a conflict remains, the plugin receives conflict-marker content and writes it into the file. This works on mobile because the user resolves the file inside Obsidian, then runs **Resolve current conflict file** or syncs again.
 
+The sidebar file-history view shows a **Resolve** action next to **Sync** when the current file contains conflict markers. Closing the resolver refreshes open Obsync history views and the mobile sync indicator.
+
+## Backup and restore
+
+Back up the complete server data directory configured by `OBSIDIAN_GIT_SYNC_DATA_DIR`. A consistent backup must include:
+
+- `data/users/{user}/vaults/{vault}/repo`
+- `data/users/{user}/vaults/{vault}/binary`
+- `data/users/{user}/vaults/{vault}/state.json`
+- `auth/password.json` when using password mode
+
+Recommended procedure:
+
+1. Stop the server or take a filesystem snapshot.
+2. Copy the full data directory.
+3. Restart the server.
+4. Verify `/health` and `/v1/server/info`.
+
+Restore procedure:
+
+1. Stop the server.
+2. Restore the full data directory to the configured `OBSIDIAN_GIT_SYNC_DATA_DIR`.
+3. Start the server.
+4. Open Obsync settings, verify the server version is shown, then run a manual sync from one client.
+
+Do not restore only the Git repository without the binary object store. Binary file version retrieval depends on the `binary` directory retaining objects referenced by Git metadata.
+
+## Server maintenance
+
+- Rotate password-mode tokens by stopping the server and deleting `auth/password.json`; then complete password setup again.
+- For OIDC, rotate tokens at the identity provider. Clients refresh expired access tokens automatically when a refresh token is available; otherwise they should log in again when the plugin reports an expired or unauthorized login.
+- Keep `uploads/` on persistent storage while syncs are active. Stale upload directories can be removed only when no clients are syncing.
+- Keep the `binary/` object store with the Git repo. Pruning binary objects without checking Git metadata can break historical binary versions.
+- Monitor server logs for `request failed`, Git rebase failures, and upload verification failures.
+
 ## API
 
 - `GET /v1/auth/config`
@@ -325,6 +390,6 @@ If a conflict remains, the plugin receives conflict-marker content and writes it
 
 - The server sees plaintext vault contents.
 - End-to-end encrypted content is out of scope for v1 because it prevents server-side text merges.
-- OIDC device login is implemented; automatic refresh-token storage is not implemented yet.
+- OIDC device login is implemented. Refresh tokens are stored when the provider returns them; configure the provider scope, for example `offline_access`, if refresh tokens are required.
 - Binary file version retrieval depends on the server object store retaining the hash referenced by Git metadata.
-- The plugin stores the access token in Obsidian plugin data. Use short-lived OIDC access tokens when using OIDC; refresh-token storage is intentionally not implemented. Password mode tokens can be rotated by deleting `auth/password.json` or resetting the password data directory.
+- The plugin stores access and refresh tokens in Obsidian plugin data. Use provider-side token rotation policies for OIDC. Password mode tokens can be rotated by deleting `auth/password.json` or resetting the password data directory.

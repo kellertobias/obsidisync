@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 const SITE_SESSION_COOKIE: &str = "obsync_session";
+const SERVER_API_VERSION: u32 = 1;
+const MIN_CLIENT_API_VERSION: u32 = 1;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -65,6 +67,15 @@ struct AuthSessionResponse {
     subject: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerInfoResponse {
+    name: &'static str,
+    version: &'static str,
+    api_version: u32,
+    min_client_api_version: u32,
+}
+
 impl<E> From<E> for ApiError
 where
     E: Into<anyhow::Error>,
@@ -112,6 +123,7 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
             "/health",
             get(|| async { Json(serde_json::json!({ "ok": true })) }),
         )
+        .route("/v1/server/info", get(server_info))
         .route("/v1/auth/config", get(auth_config))
         .route("/v1/auth/session", get(auth_session))
         .route("/v1/auth/password/setup", post(setup_password))
@@ -139,6 +151,15 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
 
 async fn home_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
     Ok(Html(render_home_page(&state.public_auth)))
+}
+
+async fn server_info() -> Json<ServerInfoResponse> {
+    Json(ServerInfoResponse {
+        name: "obsync-server",
+        version: env!("CARGO_PKG_VERSION"),
+        api_version: SERVER_API_VERSION,
+        min_client_api_version: MIN_CLIENT_API_VERSION,
+    })
 }
 
 fn apply_cors(router: Router, allowed_origins: Vec<String>) -> Router {

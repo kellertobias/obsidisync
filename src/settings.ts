@@ -9,6 +9,8 @@ export interface IosGitSyncSettings {
   oidcScope: string;
   oidcAudience: string;
   oidcAccessToken: string;
+  oidcRefreshToken: string;
+  oidcAccessTokenExpiresAt: string | null;
   userSlug: string;
   vaultSlug: string;
   remoteUrl: string;
@@ -21,6 +23,14 @@ export interface IosGitSyncSettings {
   clientId: string;
   serverHead: string | null;
   lastSyncedAt: string | null;
+  lastSyncAttemptAt: string | null;
+  lastSyncCompletedAt: string | null;
+  lastSyncError: string | null;
+  lastSyncChangeCount: number;
+  syncStatus: "idle" | "running" | "queued" | "error";
+  serverVersion: string | null;
+  serverApiVersion: number | null;
+  lastServerCheckAt: string | null;
   localManifest: ManifestEntry[];
   historySnapshots: HistorySnapshotEntry[];
   historyVersions: HistoryVersionEntry[];
@@ -46,6 +56,8 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   oidcScope: "openid profile email",
   oidcAudience: "",
   oidcAccessToken: "",
+  oidcRefreshToken: "",
+  oidcAccessTokenExpiresAt: null,
   userSlug: "",
   vaultSlug: "",
   remoteUrl: "",
@@ -58,6 +70,14 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   clientId: "",
   serverHead: null,
   lastSyncedAt: null,
+  lastSyncAttemptAt: null,
+  lastSyncCompletedAt: null,
+  lastSyncError: null,
+  lastSyncChangeCount: 0,
+  syncStatus: "idle",
+  serverVersion: null,
+  serverApiVersion: null,
+  lastServerCheckAt: null,
   localManifest: [],
   historySnapshots: [],
   historyVersions: []
@@ -139,7 +159,30 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync status")
-      .setDesc(this.plugin.isSyncRunning() ? "Sync is running." : "No sync is running.");
+      .setDesc(syncStatusDescription(this.plugin.settings));
+
+    if (this.plugin.settings.lastSyncError) {
+      new Setting(containerEl)
+        .setName("Last sync error")
+        .setDesc(this.plugin.settings.lastSyncError);
+    }
+
+    new Setting(containerEl)
+      .setName("Last successful sync")
+      .setDesc(this.plugin.settings.lastSyncCompletedAt ? new Date(this.plugin.settings.lastSyncCompletedAt).toLocaleString() : "Never");
+
+    new Setting(containerEl)
+      .setName("Server")
+      .setDesc(
+        this.plugin.settings.serverVersion
+          ? `Version ${this.plugin.settings.serverVersion}, API ${this.plugin.settings.serverApiVersion ?? "unknown"}`
+          : "Not checked yet."
+      )
+      .addButton((button) =>
+        button.setButtonText("Check").onClick(() => {
+          this.plugin.checkConnection();
+        })
+      );
 
     new Setting(containerEl)
       .setName("Sync on startup")
@@ -176,6 +219,17 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Refresh token")
+      .setDesc("Stored after OIDC login when the provider returns one. Used to refresh expired access tokens.")
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text.setValue(this.plugin.settings.oidcRefreshToken).onChange(async (value) => {
+          this.plugin.settings.oidcRefreshToken = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
       .setName("User namespace")
       .setDesc("Normally set by login. Must match the authenticated server user.")
       .addText((text) =>
@@ -196,4 +250,11 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
         })
       );
   }
+}
+
+function syncStatusDescription(settings: IosGitSyncSettings): string {
+  if (settings.syncStatus === "running") return "Sync is running.";
+  if (settings.syncStatus === "queued") return "Another sync will run after the current one finishes.";
+  if (settings.syncStatus === "error") return "Last sync failed.";
+  return `Idle. Last attempt: ${settings.lastSyncAttemptAt ? new Date(settings.lastSyncAttemptAt).toLocaleString() : "Never"}.`;
 }
