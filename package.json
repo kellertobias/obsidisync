@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Obsidian sync plugin for iOS, iPadOS, and macOS plus a low-footprint server-side Git worker.",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kellertobias/obsidisync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kellertobias/obsidisync/issues"
+  },
+  "homepage": "https://github.com/kellertobias/obsidisync#readme",
   "scripts": {
     "build": "npm run build:plugin && npm run build:server",
     "build:plugin": "tsc -p tsconfig.json --noEmit --skipLibCheck && node esbuild.config.mjs production",
@@ -19,7 +27,7 @@
     "ios",
     "ipad"
   ],
-  "author": "",
+  "author": "Tobias S. Keller",
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20.11.30",

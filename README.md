@@ -59,6 +59,8 @@ Production OIDC mode:
 ```bash
 export OIDC_ISSUER="https://issuer.example.com"
 export OIDC_AUDIENCE="obsidian-git-sync"
+export OIDC_DEVICE_CLIENT_ID="obsidian-device"
+export OIDC_DEVICE_SCOPE="openid profile email"
 export OIDC_USER_CLAIM="preferred_username"
 export OIDC_JWKS_URL="https://issuer.example.com/keys" # optional; otherwise discovered from OIDC metadata
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
@@ -79,7 +81,7 @@ export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example
 npm run start:server
 ```
 
-Then open `/login` on the server, enter the configured username, and set the password. The page returns an access token. Paste that token into the Obsidian plugin access token field. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
+Then click **Log in** in the Obsidian plugin settings. On the first login, the plugin sets the password through the server; later logins use the same button and store the returned access token automatically. The web `/login` page remains available for browser access to the change feed and manual token recovery. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
 
 After logging in, the page also shows a recent change feed for the user's synced vaults.
 
@@ -103,6 +105,7 @@ docker run --rm \
   -v obsidian-git-sync-data:/data \
   -e OIDC_ISSUER="https://issuer.example.com" \
   -e OIDC_AUDIENCE="obsidian-git-sync" \
+  -e OIDC_DEVICE_CLIENT_ID="obsidian-device" \
   -e OIDC_USER_CLAIM="preferred_username" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
   obsidian-git-sync-server
@@ -133,16 +136,37 @@ Install:
 Configure:
 
 - Sync server URL
-- OIDC issuer, client ID, scope, and optional audience when using OIDC
-- Access token from OIDC/device login or `/login` password mode
-- User namespace, e.g. `alice`
-- Vault namespace, e.g. `personal`
-- Git remote URL, optional
-- Branch
+- Click **Log in**. The plugin fetches public auth settings from the server and stores the access token automatically.
+- Vault name, e.g. `personal`. This defaults to the Obsidian vault name.
 - Author name/email
-- Optional device name
+- Optional computer name
+- Sync on startup and sync interval
+
+Advanced settings:
+
+- Access token, only for static-token development servers or recovery.
+- User namespace, normally set automatically from the authenticated server user.
+- Git remote URL, optional.
+- Branch.
 
 The Git remote URL is used only by the server. Leave it blank to use only the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`. SSH works if the server's native Git/SSH environment is configured.
+
+### Login flow
+
+The plugin only needs the sync server URL to start login:
+
+1. The plugin calls `GET /v1/auth/config`.
+2. In password mode, the plugin shows a username/password form and calls `/v1/auth/password/login` or `/v1/auth/password/setup`.
+3. In OIDC mode, the server returns the public device-flow client configuration, and the plugin performs device login with the issuer advertised by the server.
+4. The plugin stores the returned access token and calls `GET /v1/auth/session` to set the user namespace.
+
+OIDC provider details are server configuration, not client setup. In OIDC mode the server requires:
+
+- `OIDC_ISSUER`: issuer base URL.
+- `OIDC_AUDIENCE`: audience expected in access tokens.
+- `OIDC_DEVICE_CLIENT_ID`: public OIDC client configured for device authorization.
+- `OIDC_DEVICE_SCOPE`: optional, defaults to `openid profile email`.
+- `OIDC_USER_CLAIM`: optional, defaults to `preferred_username`.
 
 ## Version UI
 
@@ -151,7 +175,7 @@ The plugin adds:
 - **Show current file versions**
 - **Resolve current conflict file**
 - **Sync now**
-- **Start OIDC device login**
+- **Log in to Obsync**
 
 The version modal lists commits for the active file, previews selected versions read-only, copies text versions, and can replace the current file with a selected version.
 
@@ -166,6 +190,10 @@ If a conflict remains, the plugin receives conflict-marker content and writes it
 
 ## API
 
+- `GET /v1/auth/config`
+- `GET /v1/auth/session`
+- `POST /v1/auth/password/setup`
+- `POST /v1/auth/password/login`
 - `POST /v1/users/{user}/vaults/{vault}/register`
 - `POST /v1/users/{user}/vaults/{vault}/uploads`
 - `POST /v1/users/{user}/vaults/{vault}/uploads/{upload}/chunk`

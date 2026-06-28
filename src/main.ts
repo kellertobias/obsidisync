@@ -1,9 +1,10 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
+import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
-import { createClientId } from "./runtime";
+import { createClientId, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 
 export default class ObsyncPlugin extends Plugin {
@@ -15,6 +16,10 @@ export default class ObsyncPlugin extends Plugin {
     await this.loadSettings();
     if (!this.settings.clientId) {
       this.settings.clientId = createClientId();
+      await this.saveSettings();
+    }
+    if (!this.settings.vaultSlug) {
+      this.settings.vaultSlug = slugFromName(this.app.vault.getName(), "personal");
       await this.saveSettings();
     }
 
@@ -52,6 +57,12 @@ export default class ObsyncPlugin extends Plugin {
           this.settings.deviceName = name;
           await this.saveSettings();
         }).open()
+    });
+
+    this.addCommand({
+      id: "login",
+      name: "Log in to Obsync",
+      callback: () => this.openLoginModal()
     });
 
     this.addCommand({
@@ -107,6 +118,12 @@ export default class ObsyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     if (this.gitService) this.gitService.updateSettings(this.settings);
+  }
+
+  openLoginModal(): void {
+    new AuthLoginModal(this.app, this.gitService, async () => {
+      await this.saveSettings();
+    }).open();
   }
 
   resetSyncTimer(): void {

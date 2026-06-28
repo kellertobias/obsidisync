@@ -6,7 +6,7 @@ use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -16,6 +16,7 @@ const SITE_SESSION_COOKIE: &str = "obsync_session";
 pub struct AppState {
     pub vaults: VaultService,
     pub auth: AuthVerifier,
+    pub public_auth: PublicAuthConfig,
 }
 
 #[derive(Debug)]
@@ -24,6 +25,41 @@ pub struct ApiError(anyhow::Error);
 #[derive(Debug, Deserialize)]
 pub struct HistoryQuery {
     pub path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum PublicAuthConfig {
+    Password,
+    Oidc {
+        issuer: String,
+        client_id: String,
+        scope: String,
+        audience: Option<String>,
+    },
+    Token,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+enum PublicAuthConfigResponse {
+    Password {
+        #[serde(rename = "passwordConfigured")]
+        password_configured: bool,
+    },
+    Oidc {
+        issuer: String,
+        client_id: String,
+        scope: String,
+        audience: Option<String>,
+    },
+    Token,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthSessionResponse {
+    user: String,
+    subject: String,
 }
 
 impl<E> From<E> for ApiError
@@ -73,6 +109,8 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
             "/health",
             get(|| async { Json(serde_json::json!({ "ok": true })) }),
         )
+        .route("/v1/auth/config", get(auth_config))
+        .route("/v1/auth/session", get(auth_session))
         .route("/v1/auth/password/setup", post(setup_password))
         .route("/v1/auth/password/login", post(login_password))
         .route("/v1/users/:user/feed", get(feed))
@@ -246,6 +284,40 @@ async fn login_password(
             .login_password(&request.username, &request.password)
             .await?,
     ))
+}
+
+async fn auth_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PublicAuthConfigResponse>, ApiError> {
+    let response = match &state.public_auth {
+        PublicAuthConfig::Password => PublicAuthConfigResponse::Password {
+            password_configured: state.auth.password_is_configured().await?,
+        },
+        PublicAuthConfig::Oidc {
+            issuer,
+            client_id,
+            scope,
+            audience,
+        } => PublicAuthConfigResponse::Oidc {
+            issuer: issuer.clone(),
+            client_id: client_id.clone(),
+            scope: scope.clone(),
+            audience: audience.clone(),
+        },
+        PublicAuthConfig::Token => PublicAuthConfigResponse::Token,
+    };
+    Ok(Json(response))
+}
+
+async fn auth_session(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<AuthSessionResponse>, ApiError> {
+    let auth = state.auth.verify_headers(&headers).await?;
+    Ok(Json(AuthSessionResponse {
+        user: auth.user,
+        subject: auth.subject,
+    }))
 }
 
 fn render_password_page(

@@ -4,7 +4,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use obsidian_git_sync_server::auth::{normalize_user_claim, AuthVerifier};
 use obsidian_git_sync_server::git::git;
-use obsidian_git_sync_server::http::{router, AppState};
+use obsidian_git_sync_server::http::{router, AppState, PublicAuthConfig};
 use obsidian_git_sync_server::paths::{is_text_or_code_path, validate_vault_path};
 use obsidian_git_sync_server::protocol::{
     ClientChange, ManifestEntry, RegisterRequest, ResolveRequest, ResolvedFile, SyncRequest,
@@ -89,6 +89,7 @@ async fn http_authorization_rejects_cross_user_access() {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
+            public_auth: PublicAuthConfig::Token,
         },
         1024 * 1024,
         Vec::new(),
@@ -135,6 +136,7 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         AppState {
             vaults: VaultService::new(data_dir.clone()),
             auth: AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
+            public_auth: PublicAuthConfig::Password,
         },
         1024 * 1024,
         Vec::new(),
@@ -153,6 +155,22 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         .unwrap();
     assert_eq!(setup_page.status(), StatusCode::OK);
     assert!(response_text(setup_page).await.contains("Set password"));
+
+    let config_before_setup = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/auth/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(config_before_setup.status(), StatusCode::OK);
+    let config_body = response_json(config_before_setup).await;
+    assert_eq!(config_body["type"], "password");
+    assert_eq!(config_body["passwordConfigured"], false);
 
     let setup_form = app
         .clone()
@@ -196,6 +214,22 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
     assert_eq!(login_body["user"], "alice");
     let token = login_body["accessToken"].as_str().unwrap();
     assert!(!token.is_empty());
+
+    let session = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/auth/session")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(session.status(), StatusCode::OK);
+    let session_body = response_json(session).await;
+    assert_eq!(session_body["user"], "alice");
 
     let register_vault = app
         .clone()
@@ -417,6 +451,7 @@ async fn http_rejects_oversized_sync_bodies() {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
+            public_auth: PublicAuthConfig::Token,
         },
         128,
         Vec::new(),
@@ -447,6 +482,7 @@ async fn http_does_not_allow_cross_origin_by_default() {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
+            public_auth: PublicAuthConfig::Token,
         },
         1024 * 1024,
         Vec::new(),

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use obsidian_git_sync_server::auth::AuthVerifier;
-use obsidian_git_sync_server::http::{router, AppState};
+use obsidian_git_sync_server::http::{router, AppState, PublicAuthConfig};
 use obsidian_git_sync_server::remote::RemotePolicy;
 use obsidian_git_sync_server::vault::{VaultService, VaultServiceOptions};
 use std::net::SocketAddr;
@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
         AppState {
             vaults,
             auth: config.auth,
+            public_auth: config.public_auth,
         },
         config.max_body_bytes,
         config.allowed_origins,
@@ -35,6 +36,7 @@ struct RuntimeConfig {
     listen: SocketAddr,
     data_dir: PathBuf,
     auth: AuthVerifier,
+    public_auth: PublicAuthConfig,
     max_body_bytes: usize,
     remote_policy: RemotePolicy,
     allowed_origins: Vec<String>,
@@ -52,19 +54,41 @@ impl RuntimeConfig {
             std::env::var("OBSIDIAN_GIT_SYNC_DATA_DIR").unwrap_or_else(|_| "data".to_string()),
         );
 
-        let auth = if let Ok(token) = std::env::var("OBSIDIAN_GIT_SYNC_DEV_TOKEN") {
+        let (auth, public_auth) = if let Ok(token) = std::env::var("OBSIDIAN_GIT_SYNC_DEV_TOKEN") {
             let user =
                 std::env::var("OBSIDIAN_GIT_SYNC_DEV_USER").unwrap_or_else(|_| "dev".to_string());
-            AuthVerifier::StaticTokenForDev { token, user }
+            (AuthVerifier::StaticTokenForDev { token, user }, PublicAuthConfig::Token)
         } else if let Some(user) = password_user_env() {
-            AuthVerifier::password(user, data_dir.clone())?
+            (
+                AuthVerifier::password(user, data_dir.clone())?,
+                PublicAuthConfig::Password,
+            )
         } else {
             let issuer = required_env("OIDC_ISSUER")?;
             let audience = required_env("OIDC_AUDIENCE")?;
             let jwks_url = std::env::var("OIDC_JWKS_URL").ok();
             let user_claim = std::env::var("OIDC_USER_CLAIM")
                 .unwrap_or_else(|_| "preferred_username".to_string());
-            AuthVerifier::oidc(issuer, audience, jwks_url, user_claim)?
+            let client_id = std::env::var("OIDC_DEVICE_CLIENT_ID")
+                .or_else(|_| std::env::var("OIDC_CLIENT_ID"))
+                .map_err(|_| anyhow::anyhow!("OIDC_DEVICE_CLIENT_ID is required for plugin login in OIDC mode"))?;
+            let scope = std::env::var("OIDC_DEVICE_SCOPE")
+                .unwrap_or_else(|_| "openid profile email".to_string());
+            let auth = AuthVerifier::oidc(
+                issuer.clone(),
+                audience.clone(),
+                jwks_url,
+                user_claim,
+            )?;
+            (
+                auth,
+                PublicAuthConfig::Oidc {
+                    issuer,
+                    client_id,
+                    scope,
+                    audience: Some(audience),
+                },
+            )
         };
         let max_body_bytes = std::env::var("OBSIDIAN_GIT_SYNC_MAX_BODY_BYTES")
             .unwrap_or_else(|_| (50 * 1024 * 1024).to_string())
@@ -79,6 +103,7 @@ impl RuntimeConfig {
             listen,
             data_dir,
             auth,
+            public_auth,
             max_body_bytes,
             remote_policy,
             allowed_origins,

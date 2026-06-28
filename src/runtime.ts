@@ -46,6 +46,16 @@ export function getDeviceName(
   return "Obsidian device";
 }
 
+export function slugFromName(name: string | undefined, fallback: string): string {
+  const slug = (name ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return slug || fallback;
+}
+
 function toHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }

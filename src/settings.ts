@@ -89,68 +89,17 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Access token")
-      .setDesc("Bearer token from OIDC/device login or the server password login page.")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setValue(this.plugin.settings.oidcAccessToken).onChange(async (value) => {
-          this.plugin.settings.oidcAccessToken = value;
-          await this.plugin.saveSettings();
-        });
-      });
-
-    new Setting(containerEl)
-      .setName("OIDC issuer")
-      .setDesc("Issuer base URL for device login, for example https://auth.example.com/realms/obsidian.")
-      .addText((text) =>
-        text.setPlaceholder("https://issuer.example.com").setValue(this.plugin.settings.oidcIssuer).onChange(async (value) => {
-          this.plugin.settings.oidcIssuer = value.trim();
-          await this.plugin.saveSettings();
+      .setName("Login")
+      .setDesc(this.plugin.settings.oidcAccessToken ? `Logged in as ${this.plugin.settings.userSlug || "configured user"}.` : "Fetch login settings from the sync server and store the access token automatically.")
+      .addButton((button) =>
+        button.setCta().setButtonText(this.plugin.settings.oidcAccessToken ? "Log in again" : "Log in").onClick(() => {
+          this.plugin.openLoginModal();
         })
       );
 
     new Setting(containerEl)
-      .setName("OIDC client ID")
-      .setDesc("Public client configured for device authorization.")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.oidcClientId).onChange(async (value) => {
-          this.plugin.settings.oidcClientId = value.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("OIDC scope")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.oidcScope).onChange(async (value) => {
-          this.plugin.settings.oidcScope = value.trim() || DEFAULT_SETTINGS.oidcScope;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("OIDC audience")
-      .setDesc("Optional audience/resource parameter if your provider requires it.")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.oidcAudience).onChange(async (value) => {
-          this.plugin.settings.oidcAudience = value.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("User namespace")
-      .setDesc("Must match the normalized OIDC user claim on the server.")
-      .addText((text) =>
-        text.setPlaceholder("alice").setValue(this.plugin.settings.userSlug).onChange(async (value) => {
-          this.plugin.settings.userSlug = value.trim();
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Vault namespace")
-      .setDesc("Server path segment for this vault, for example personal or work.")
+      .setName("Vault name")
+      .setDesc("Server vault name. Defaults to this Obsidian vault name.")
       .addText((text) =>
         text.setPlaceholder("personal").setValue(this.plugin.settings.vaultSlug).onChange(async (value) => {
           this.plugin.settings.vaultSlug = value.trim();
@@ -208,6 +157,8 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
         })
       );
 
+    containerEl.createEl("h3", { text: "Sync" });
+
     new Setting(containerEl)
       .setName("Sync on startup")
       .addToggle((toggle) =>
@@ -226,6 +177,29 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
           this.plugin.settings.syncIntervalMinutes = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
           await this.plugin.saveSettings();
           this.plugin.resetSyncTimer();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Advanced" });
+
+    new Setting(containerEl)
+      .setName("Access token")
+      .setDesc("Manual fallback for static-token development servers or recovery.")
+      .addText((text) => {
+        text.inputEl.type = "password";
+        text.setValue(this.plugin.settings.oidcAccessToken).onChange(async (value) => {
+          this.plugin.settings.oidcAccessToken = value;
+          await this.plugin.saveSettings();
+        });
+      });
+
+    new Setting(containerEl)
+      .setName("User namespace")
+      .setDesc("Normally set by login. Must match the authenticated server user.")
+      .addText((text) =>
+        text.setPlaceholder("alice").setValue(this.plugin.settings.userSlug).onChange(async (value) => {
+          this.plugin.settings.userSlug = value.trim();
+          await this.plugin.saveSettings();
         })
       );
 

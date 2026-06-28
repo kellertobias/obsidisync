@@ -41,9 +41,26 @@ interface OidcTokenResponse {
   error_description?: string;
 }
 
+export type ServerAuthConfig =
+  | { type: "password"; passwordConfigured: boolean }
+  | { type: "oidc"; issuer: string; clientId: string; scope: string; audience?: string | null }
+  | { type: "token" };
+
+interface PasswordLoginResponse {
+  user: string;
+  accessToken: string;
+}
+
+interface AuthSessionResponse {
+  user: string;
+  subject: string;
+}
+
 export class GitService {
   private running = false;
   private oidcDiscoveryCache: OidcDiscovery | null = null;
+  private oidcLoginConfig: Extract<ServerAuthConfig, { type: "oidc" }> | null = null;
+  private oidcLoginServerUrl: string | null = null;
 
   constructor(
     private readonly vault: Vault,
@@ -52,11 +69,59 @@ export class GitService {
   ) {}
 
   updateSettings(settings: IosGitSyncSettings): void {
+    if (settings.serverUrl !== this.settings.serverUrl) {
+      this.oidcDiscoveryCache = null;
+      this.oidcLoginConfig = null;
+      this.oidcLoginServerUrl = null;
+    }
     this.settings = settings;
   }
 
   currentDeviceName(): string {
     return this.deviceName();
+  }
+
+  async authConfig(): Promise<ServerAuthConfig> {
+    if (!this.settings.serverUrl) throw new Error("Set a sync server URL before logging in");
+    assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    const response = await requestUrl({
+      url: `${serverUrl}/v1/auth/config`,
+      method: "GET",
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(response.text || `Auth configuration failed: HTTP ${response.status}`);
+    }
+    return response.json as ServerAuthConfig;
+  }
+
+  async loginPassword(username: string, password: string, setup: boolean): Promise<void> {
+    if (!this.settings.serverUrl) throw new Error("Set a sync server URL before logging in");
+    assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    const response = await requestUrl({
+      url: `${serverUrl}/v1/auth/password/${setup ? "setup" : "login"}`,
+      method: "POST",
+      contentType: "application/json",
+      body: JSON.stringify({ username, password }),
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(response.text || `Password login failed: HTTP ${response.status}`);
+    }
+
+    const body = response.json as PasswordLoginResponse;
+    this.settings.oidcAccessToken = body.accessToken;
+    this.settings.userSlug = body.user;
+    await this.saveSettings();
+  }
+
+  async loadAuthenticatedUser(): Promise<void> {
+    if (!this.settings.oidcAccessToken) throw new Error("Log in before loading the authenticated user");
+    const session = await this.getJson<AuthSessionResponse>("/v1/auth/session");
+    this.settings.userSlug = session.user;
+    await this.saveSettings();
   }
 
   async sync(): Promise<void> {
@@ -126,17 +191,15 @@ export class GitService {
   }
 
   async beginOidcDeviceLogin(): Promise<OidcDeviceAuthorization> {
-    if (!this.settings.oidcIssuer) throw new Error("Set an OIDC issuer before starting login");
-    if (!this.settings.oidcClientId) throw new Error("Set an OIDC client ID before starting login");
-    assertSecureHttpUrl(this.settings.oidcIssuer, "OIDC issuer");
+    const config = await this.serverOidcLoginConfig();
 
     const discovery = await this.oidcDiscovery();
     const params = new URLSearchParams();
-    params.set("client_id", this.settings.oidcClientId);
-    params.set("scope", this.settings.oidcScope || "openid profile email");
-    if (this.settings.oidcAudience) {
-      params.set("audience", this.settings.oidcAudience);
-      params.set("resource", this.settings.oidcAudience);
+    params.set("client_id", config.clientId);
+    params.set("scope", config.scope || "openid profile email");
+    if (config.audience) {
+      params.set("audience", config.audience);
+      params.set("resource", config.audience);
     }
 
     const response = await requestUrl({
@@ -163,7 +226,7 @@ export class GitService {
       const params = new URLSearchParams();
       params.set("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
       params.set("device_code", deviceCode);
-      params.set("client_id", this.settings.oidcClientId);
+      params.set("client_id", (await this.serverOidcLoginConfig()).clientId);
 
       const response = await requestUrl({
         url: discovery.token_endpoint,
@@ -177,6 +240,7 @@ export class GitService {
       if (response.status >= 200 && response.status < 300 && body.access_token) {
         this.settings.oidcAccessToken = body.access_token;
         await this.saveSettings();
+        await this.loadAuthenticatedUser();
         new Notice("OIDC login complete");
         return;
       }
@@ -276,7 +340,7 @@ export class GitService {
 
   private async oidcDiscovery(): Promise<OidcDiscovery> {
     if (this.oidcDiscoveryCache) return this.oidcDiscoveryCache;
-    const issuer = this.settings.oidcIssuer.replace(/\/+$/, "");
+    const issuer = (await this.serverOidcLoginConfig()).issuer.replace(/\/+$/, "");
     const response = await requestUrl({
       url: `${issuer}/.well-known/openid-configuration`,
       method: "GET",
@@ -293,6 +357,20 @@ export class GitService {
     assertSecureHttpUrl(discovery.token_endpoint, "OIDC token endpoint");
     this.oidcDiscoveryCache = discovery;
     return discovery;
+  }
+
+  private async serverOidcLoginConfig(): Promise<Extract<ServerAuthConfig, { type: "oidc" }>> {
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    if (this.oidcLoginConfig && this.oidcLoginServerUrl === serverUrl) return this.oidcLoginConfig;
+    const config = await this.authConfig();
+    if (config.type !== "oidc") {
+      throw new Error("This server is not configured for OIDC device login");
+    }
+    assertSecureHttpUrl(config.issuer, "OIDC issuer");
+    this.oidcDiscoveryCache = null;
+    this.oidcLoginConfig = config;
+    this.oidcLoginServerUrl = serverUrl;
+    return config;
   }
 
   private async exclusive<T>(operation: () => Promise<T>): Promise<T | undefined> {
