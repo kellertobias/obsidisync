@@ -55,8 +55,19 @@ export class OidcDeviceLoginModal extends Modal {
           await navigator.clipboard.writeText(this.authorization?.verification_uri_complete || this.authorization?.verification_uri || "");
           new Notice("OIDC verification URL copied");
         })
+      )
+      .addButton((button) =>
+        button.setButtonText("Open URL").onClick(() => {
+          openAuthorizationUrl(this.authorization);
+        })
       );
 
     this.statusEl = contentEl.createEl("p", { text: "Waiting for authorization..." });
   }
+}
+
+function openAuthorizationUrl(authorization: OidcDeviceAuthorization | null): void {
+  const url = authorization?.verification_uri_complete || authorization?.verification_uri;
+  if (!url) return;
+  window.open(url, "_blank");
 }

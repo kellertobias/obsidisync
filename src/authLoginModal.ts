@@ -133,6 +133,11 @@ export class AuthLoginModal extends Modal {
           await navigator.clipboard.writeText(this.authorization?.verification_uri_complete || this.authorization?.verification_uri || "");
           new Notice("Login URL copied");
         })
+      )
+      .addButton((button) =>
+        button.setButtonText("Open URL").onClick(() => {
+          openAuthorizationUrl(this.authorization);
+        })
       );
 
     this.statusEl = contentEl.createEl("p", { text: "Waiting for authorization..." });
@@ -159,4 +164,10 @@ export class AuthLoginModal extends Modal {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function openAuthorizationUrl(authorization: OidcDeviceAuthorization | null): void {
+  const url = authorization?.verification_uri_complete || authorization?.verification_uri;
+  if (!url) return;
+  window.open(url, "_blank");
 }
