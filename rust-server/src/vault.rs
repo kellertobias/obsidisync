@@ -59,6 +59,15 @@ struct UploadState {
     complete: bool,
 }
 
+struct ClientChangeContext<'a> {
+    user: &'a str,
+    vault: &'a str,
+    repo: &'a Path,
+    binary_root: &'a Path,
+    upload_root: &'a Path,
+    base_head: Option<&'a str>,
+}
+
 impl VaultState {
     fn uses_remote(&self) -> bool {
         !self.remote_url.trim().is_empty()
@@ -276,12 +285,14 @@ impl VaultService {
 
             let conflicts = self
                 .apply_client_changes(
-                    &user,
-                    &vault,
-                    &repo,
-                    &binary_root,
-                    &upload_root,
-                    base_head.as_deref(),
+                    ClientChangeContext {
+                        user: &user,
+                        vault: &vault,
+                        repo: &repo,
+                        binary_root: &binary_root,
+                        upload_root: &upload_root,
+                        base_head: base_head.as_deref(),
+                    },
                     &request.changes,
                 )
                 .await?;
@@ -744,20 +755,17 @@ impl VaultService {
 
     async fn apply_client_changes(
         &self,
-        user: &str,
-        vault: &str,
-        repo: &Path,
-        binary_root: &Path,
-        upload_root: &Path,
-        base_head: Option<&str>,
+        context: ClientChangeContext<'_>,
         changes: &[ClientChange],
     ) -> Result<Vec<SyncConflict>> {
         let mut conflicts = Vec::new();
-        let pending_conflicts = self.read_pending_conflicts(user, vault).await?;
-        let mut manifest = read_manifest(repo).await?;
-        let base_manifest = match base_head {
+        let pending_conflicts = self
+            .read_pending_conflicts(context.user, context.vault)
+            .await?;
+        let mut manifest = read_manifest(context.repo).await?;
+        let base_manifest = match context.base_head {
             Some(head) => self
-                .binary_manifest_at(repo, head)
+                .binary_manifest_at(context.repo, head)
                 .await
                 .unwrap_or_default(),
             None => BinaryManifest::default(),
@@ -776,13 +784,15 @@ impl VaultService {
                         continue;
                     }
                     if is_text_or_code_path(&safe) {
-                        if let Some(conflict) = apply_text_delete(repo, base_head, &safe).await? {
+                        if let Some(conflict) =
+                            apply_text_delete(context.repo, context.base_head, &safe).await?
+                        {
                             conflicts.push(conflict);
                         }
                     } else {
                         let current_entry = manifest.files.get(&safe);
                         let base_entry = base_manifest.files.get(&safe);
-                        if base_head.is_some() && current_entry != base_entry {
+                        if context.base_head.is_some() && current_entry != base_entry {
                             conflicts.push(SyncConflict {
                                 path: safe,
                                 reason:
@@ -812,7 +822,7 @@ impl VaultService {
                     }
                     let content = self
                         .content_from_inline_or_upload(
-                            upload_root,
+                            context.upload_root,
                             &safe,
                             content_base64.as_ref(),
                             upload_id.as_ref(),
@@ -820,14 +830,15 @@ impl VaultService {
                         .await?;
                     if is_text_or_code_path(&safe) {
                         if let Some(conflict) =
-                            apply_text_upsert(repo, base_head, &safe, &content).await?
+                            apply_text_upsert(context.repo, context.base_head, &safe, &content)
+                                .await?
                         {
                             conflicts.push(conflict);
                         }
                     } else {
                         let current_entry = manifest.files.get(&safe);
                         let base_entry = base_manifest.files.get(&safe);
-                        if base_head.is_some() && current_entry != base_entry {
+                        if context.base_head.is_some() && current_entry != base_entry {
                             conflicts.push(SyncConflict {
                                 path: safe,
                                 reason: "binary file changed on both server and client; choose one version and resolve from Obsidian".to_string(),
@@ -835,7 +846,8 @@ impl VaultService {
                             continue;
                         }
                         let entry =
-                            store_binary(binary_root, &safe, &content, mtime.unwrap_or(0)).await?;
+                            store_binary(context.binary_root, &safe, &content, mtime.unwrap_or(0))
+                                .await?;
                         manifest.files.insert(safe, entry);
                         binary_manifest_changed = true;
                     }
@@ -844,7 +856,7 @@ impl VaultService {
         }
 
         if binary_manifest_changed {
-            write_manifest(repo, &manifest).await?;
+            write_manifest(context.repo, &manifest).await?;
         }
         Ok(conflicts)
     }
