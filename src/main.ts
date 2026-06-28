@@ -1,4 +1,4 @@
-import { MarkdownView, Notice, Platform, Plugin, setIcon } from "obsidian";
+import { MarkdownView, Notice, Platform, Plugin } from "obsidian";
 import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
 import { ConflictResolverModal } from "./conflictResolverModal";
@@ -8,6 +8,7 @@ import { OidcDeviceLoginModal } from "./oidcModal";
 import { SyncConflict } from "./protocol";
 import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
+import { sha256Hex } from "./vaultState";
 
 export default class ObsyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
@@ -179,41 +180,41 @@ export default class ObsyncPlugin extends Plugin {
 
     const styleEl = document.createElement("style");
     styleEl.textContent = `
-      @keyframes obsync-mobile-sync-spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
-      }
       .obsync-mobile-sync-indicator {
         align-items: center;
         color: var(--text-muted);
         display: none;
+        flex-direction: column;
         flex: 0 0 auto;
         height: var(--clickable-icon-size, 32px);
-        justify-content: center;
         margin-inline: 2px;
         max-width: 92px;
         min-width: var(--clickable-icon-size, 32px);
         overflow: hidden;
         padding-inline: 4px;
-        white-space: nowrap;
-      }
-      .obsync-mobile-sync-indicator svg {
-        animation: obsync-mobile-sync-spin 1s linear infinite;
-        height: 18px;
-        width: 18px;
-      }
-      .obsync-mobile-sync-indicator:not(.is-syncing) {
         font-size: 11px;
         font-weight: 600;
         justify-content: flex-end;
         line-height: 1;
         text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .obsync-mobile-sync-indicator-row {
+        display: block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .obsync-mobile-sync-indicator-state {
+        color: var(--text-faint);
+        font-size: 10px;
+        text-transform: lowercase;
       }
     `;
     document.head.appendChild(styleEl);
     this.register(() => styleEl.remove());
 
-    const update = (running = this.gitService.isSyncRunning()) => this.updateMobileSyncIndicator(running);
+    const update = () => this.updateMobileSyncIndicator();
     this.register(this.gitService.onSyncStateChange(update));
     this.registerEvent(this.app.workspace.on("layout-change", () => update()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => update()));
@@ -222,22 +223,11 @@ export default class ObsyncPlugin extends Plugin {
     window.setTimeout(() => update(), 0);
   }
 
-  private updateMobileSyncIndicator(running: boolean): void {
+  private updateMobileSyncIndicator(): void {
     if (!Platform.isMobile) return;
 
     const indicator = this.ensureMobileSyncIndicator();
     if (!indicator) return;
-
-    if (running) {
-      this.mobileSyncIndicatorRequestId += 1;
-      this.clearMobileSyncIndicator(indicator);
-      indicator.addClass("is-syncing");
-      indicator.style.display = "inline-flex";
-      indicator.setAttribute("aria-hidden", "false");
-      indicator.title = "Obsync is syncing";
-      setIcon(indicator, "refresh-cw");
-      return;
-    }
 
     void this.refreshMobileFileSyncIndicator(indicator);
   }
@@ -251,20 +241,16 @@ export default class ObsyncPlugin extends Plugin {
     }
 
     try {
-      const history = await this.gitService.history(path);
-      if (requestId !== this.mobileSyncIndicatorRequestId || this.gitService.isSyncRunning()) return;
-      const latest = history[0];
-      if (!latest) {
-        this.hideMobileSyncIndicator(indicator);
-        return;
-      }
-      const label = formatMobileSyncDate(latest.date);
+      const savedState = await this.mobileFileSavedState(path);
+      if (requestId !== this.mobileSyncIndicatorRequestId) return;
+      const label = formatMobileSyncDate(this.settings.lastSyncedAt);
       this.clearMobileSyncIndicator(indicator);
-      indicator.removeClass("is-syncing");
-      indicator.createSpan({ text: label });
+      indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row", text: label });
+      indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row obsync-mobile-sync-indicator-state", text: savedState });
       indicator.style.display = "inline-flex";
       indicator.setAttribute("aria-hidden", "false");
-      indicator.title = `Last synced: ${formatFullDate(latest.date)}`;
+      indicator.setAttribute("aria-label", `Last synced ${label}; ${savedState}`);
+      indicator.title = `Last synced: ${formatFullDate(this.settings.lastSyncedAt)}; ${savedState}`;
     } catch {
       if (requestId === this.mobileSyncIndicatorRequestId) {
         this.hideMobileSyncIndicator(indicator);
@@ -272,9 +258,17 @@ export default class ObsyncPlugin extends Plugin {
     }
   }
 
+  private async mobileFileSavedState(path: string): Promise<"saved" | "changes"> {
+    const syncedEntry = this.settings.localManifest.find((entry) => entry.path === path);
+    if (!syncedEntry) return "changes";
+
+    const buffer = await this.app.vault.adapter.readBinary(path);
+    const currentSha = await sha256Hex(buffer);
+    return currentSha === syncedEntry.sha256 ? "saved" : "changes";
+  }
+
   private hideMobileSyncIndicator(indicator: HTMLElement): void {
     this.clearMobileSyncIndicator(indicator);
-    indicator.removeClass("is-syncing");
     indicator.style.display = "none";
     indicator.setAttribute("aria-hidden", "true");
     indicator.title = "";
@@ -297,7 +291,7 @@ export default class ObsyncPlugin extends Plugin {
     this.mobileSyncIndicatorEl?.remove();
     const indicator = document.createElement("div");
     indicator.className = "obsync-mobile-sync-indicator";
-    indicator.setAttribute("aria-label", "Obsync is syncing");
+    indicator.setAttribute("aria-label", "Obsync sync status");
 
     const menuButton = container.querySelector(
       '.view-action[aria-label*="More"], .view-action.mod-more-options, .mobile-navbar-action[aria-label*="More"], [aria-label*="More options"]'
@@ -416,7 +410,8 @@ export default class ObsyncPlugin extends Plugin {
   }
 }
 
-function formatMobileSyncDate(date: string): string {
+function formatMobileSyncDate(date: string | null): string {
+  if (!date) return "Never";
   const timestamp = Date.parse(date);
   if (Number.isNaN(timestamp)) return "Synced";
 
@@ -436,7 +431,8 @@ function formatMobileSyncDate(date: string): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function formatFullDate(date: string): string {
+function formatFullDate(date: string | null): string {
+  if (!date) return "Never";
   const timestamp = Date.parse(date);
   if (Number.isNaN(timestamp)) return date;
   return new Date(timestamp).toLocaleString();
