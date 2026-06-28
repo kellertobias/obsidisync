@@ -65,7 +65,7 @@ jobs:
           append_env() {
             name="$1"
             value="$2"
-            delimiter="obsync_env_$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            delimiter="obsync_env_$(date +%s)_$$"
             {
               printf '%s<<%s\n' "$name" "$delimiter"
               printf '%s\n' "$value"
@@ -100,7 +100,7 @@ jobs:
           append_env() {
             name="$1"
             value="$2"
-            delimiter="obsync_env_$(uuidgen | tr '[:upper:]' '[:lower:]')"
+            delimiter="obsync_env_$(date +%s)_$$"
             {
               printf '%s<<%s\n' "$name" "$delimiter"
               printf '%s\n' "$value"
