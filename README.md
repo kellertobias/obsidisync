@@ -13,6 +13,85 @@ The device does not run Git. The plugin sends changed files to:
 
 The Rust server validates the bearer token, authorizes the `{user}` namespace, commits Git history, optionally rebases and pushes to a configured remote, and returns merged file changes. Tokens can come from OIDC or from the built-in single-user password mode.
 
+## Installation overview
+
+Obsync is not registered in the Obsidian community plugin registry yet. It will not appear in **Settings -> Community plugins -> Browse**. Install it as a manual plugin by copying the built plugin files into the vault.
+
+The plugin also requires the Obsync sync server. The iOS app does not run Git and cannot sync by itself; it sends vault changes to the server, and the server performs Git commits, rebases, pushes, conflict handling, and file history lookups. Build and deploy the Docker container before configuring the plugin on iOS.
+
+### 1. Deploy the sync server
+
+Build the container:
+
+```bash
+docker build -t obsidian-git-sync-server .
+```
+
+Run it with persistent storage:
+
+```bash
+docker run --rm \
+  -p 8787:8787 \
+  -v obsidian-git-sync-data:/data \
+  -e OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice" \
+  -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
+  obsidian-git-sync-server
+```
+
+Expose the server over HTTPS for real iOS use, usually through a reverse proxy. In the plugin settings, the sync server URL must point to this deployed server.
+
+Use OIDC instead of password mode by setting the OIDC environment variables shown in [Run the Rust server](#run-the-rust-server).
+
+### 2. Build the Obsidian plugin
+
+```bash
+npm install
+npm run build:plugin
+```
+
+This produces:
+
+```text
+main.js
+manifest.json
+```
+
+### 3. Install on iOS manually
+
+Create this folder inside the Obsidian vault:
+
+```text
+.obsidian/plugins/ios-git-sync/
+```
+
+Copy the built plugin files into it:
+
+```text
+.obsidian/plugins/ios-git-sync/main.js
+.obsidian/plugins/ios-git-sync/manifest.json
+```
+
+The final layout should be:
+
+```text
+YourVault/
+  .obsidian/
+    plugins/
+      ios-git-sync/
+        main.js
+        manifest.json
+```
+
+The easiest way on iOS is usually to place the files from macOS into an iCloud Drive vault, then let iCloud sync them to the device. You can also use another file sync method that preserves the `.obsidian/plugins/ios-git-sync/` path.
+
+After the files are on the device, open Obsidian on iOS and enable **Obsync** under:
+
+```text
+Settings -> Community plugins -> Installed plugins
+```
+
+Then configure the sync server URL and click **Log in** in the Obsync settings.
+
 ## Storage model
 
 - Text/code files are stored and versioned directly in Git.
