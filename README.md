@@ -15,7 +15,7 @@ The Rust server validates the bearer token, authorizes the `{user}` namespace, c
 
 ## Installation overview
 
-Obsync is not registered in the Obsidian community plugin registry yet. It will not appear in **Settings -> Community plugins -> Browse**. Install it as a manual plugin by copying the built plugin files into the vault.
+Obsync is not registered in the Obsidian community plugin registry yet. It will not appear in **Settings -> Community plugins -> Browse**. On iOS, install it from GitHub with BRAT, or use the manual file-copy fallback below.
 
 The plugin also requires the Obsync sync server. The iOS app does not run Git and cannot sync by itself; it sends vault changes to the server, and the server performs Git commits, rebases, pushes, conflict handling, and file history lookups. Build and deploy the Docker container before configuring the plugin on iOS.
 
@@ -42,7 +42,46 @@ Expose the server over HTTPS for real iOS use, usually through a reverse proxy. 
 
 Use OIDC instead of password mode by setting the OIDC environment variables shown in [Run the Rust server](#run-the-rust-server).
 
-### 2. Build the Obsidian plugin
+### 2. Install from GitHub on iOS with BRAT
+
+BRAT is the recommended way to install Obsync on iOS before it is accepted into the official Obsidian community plugin registry.
+
+1. Open Obsidian on iOS.
+2. Go to **Settings -> Community plugins -> Browse**.
+3. Install **BRAT**.
+4. Enable **BRAT**.
+5. Open **BRAT** settings.
+6. Choose **Add Beta plugin**.
+7. Enter:
+
+```text
+https://github.com/kellertobias/obsidisync
+```
+
+or:
+
+```text
+kellertobias/obsidisync
+```
+
+BRAT installs the GitHub release assets into the vault plugin folder. The GitHub release must contain:
+
+```text
+main.js
+manifest.json
+```
+
+After BRAT installs Obsync, enable **Obsync** under:
+
+```text
+Settings -> Community plugins -> Installed plugins
+```
+
+Then configure the sync server URL and click **Log in** in the Obsync settings.
+
+### 3. Manual install fallback
+
+If you are not using BRAT, build the plugin yourself:
 
 ```bash
 npm install
@@ -55,8 +94,6 @@ This produces:
 main.js
 manifest.json
 ```
-
-### 3. Install on iOS manually
 
 Create this folder inside the Obsidian vault:
 
