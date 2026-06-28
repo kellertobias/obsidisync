@@ -177,7 +177,7 @@ impl OidcVerifier {
 
         let key = DecodingKey::from_jwk(jwk)?;
         let mut validation = Validation::new(header.alg);
-        validation.algorithms = self.allowed_algorithms.clone();
+        validation.algorithms = vec![header.alg];
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.audience.as_str()]);
         let token_data = decode::<Claims>(token, &key, &validation)?;
