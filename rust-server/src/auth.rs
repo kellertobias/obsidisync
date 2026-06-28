@@ -86,9 +86,18 @@ impl AuthVerifier {
     }
 
     pub fn password(user: String, data_dir: impl Into<PathBuf>) -> Result<Self> {
+        Self::password_with_setup_token(user, data_dir, None)
+    }
+
+    pub fn password_with_setup_token(
+        user: String,
+        data_dir: impl Into<PathBuf>,
+        setup_token: Option<String>,
+    ) -> Result<Self> {
         Ok(Self::Password(Arc::new(PasswordAuth::new(
             user,
             data_dir.into(),
+            setup_token,
         )?)))
     }
 
@@ -99,13 +108,25 @@ impl AuthVerifier {
         }
     }
 
+    pub fn password_setup_token_is_required(&self) -> Result<bool> {
+        match self {
+            AuthVerifier::Password(verifier) => Ok(verifier.setup_token_is_required()),
+            _ => bail!("password login is not enabled"),
+        }
+    }
+
     pub async fn setup_password(
         &self,
         username: &str,
         password: &str,
+        setup_token: Option<&str>,
     ) -> Result<PasswordAuthSession> {
         match self {
-            AuthVerifier::Password(verifier) => verifier.setup_password(username, password).await,
+            AuthVerifier::Password(verifier) => {
+                verifier
+                    .setup_password(username, password, setup_token)
+                    .await
+            }
             _ => bail!("password login is not enabled"),
         }
     }
@@ -147,7 +168,7 @@ impl AuthVerifier {
                 token: expected,
                 user,
             } => {
-                if constant_time_eq(token, expected) {
+                if !expected.is_empty() && !token.is_empty() && constant_time_eq(token, expected) {
                     let user = normalize_user_claim(user)?;
                     Ok(AuthContext {
                         subject: user.clone(),
@@ -363,7 +384,7 @@ mod tests {
 
         assert!(!verifier.password_is_configured().await.unwrap());
         let session = verifier
-            .setup_password("alice", "correct horse battery staple")
+            .setup_password("alice", "correct horse battery staple", None)
             .await
             .unwrap();
         assert_eq!(session.user, "alice");
@@ -382,9 +403,42 @@ mod tests {
             .await
             .is_err());
         assert!(verifier
-            .setup_password("alice", "another correct password")
+            .setup_password("alice", "another correct password", None)
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn password_setup_requires_configured_bootstrap_token() {
+        let root = tempfile::tempdir().unwrap();
+        let verifier = AuthVerifier::password_with_setup_token(
+            "Alice@example.com".to_string(),
+            root.path(),
+            Some("setup-token-123456".to_string()),
+        )
+        .unwrap();
+
+        assert!(verifier
+            .setup_password("alice", "correct horse battery staple", None)
+            .await
+            .is_err());
+        assert!(verifier
+            .setup_password(
+                "alice",
+                "correct horse battery staple",
+                Some("wrong-token-123456"),
+            )
+            .await
+            .is_err());
+        let session = verifier
+            .setup_password(
+                "alice",
+                "correct horse battery staple",
+                Some("setup-token-123456"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.user, "alice");
     }
 
     #[tokio::test]
@@ -399,6 +453,13 @@ mod tests {
         assert_eq!(auth.user, "alice");
         assert!(constant_time_eq("same", "same"));
         assert!(!constant_time_eq("same", "different"));
+
+        let empty_verifier = AuthVerifier::StaticTokenForDev {
+            token: String::new(),
+            user: "alice".to_string(),
+        };
+        headers.insert("authorization", "Bearer ".parse().unwrap());
+        assert!(empty_verifier.verify_headers(&headers).await.is_err());
     }
 
     #[test]

@@ -47,7 +47,7 @@ interface OidcTokenResponse {
 }
 
 export type ServerAuthConfig =
-  | { type: "password"; passwordConfigured: boolean }
+  | { type: "password"; passwordConfigured: boolean; setupTokenRequired?: boolean }
   | { type: "oidc"; issuer: string; clientId: string; scope: string; audience?: string | null }
   | { type: "token" };
 
@@ -116,15 +116,17 @@ export class GitService {
     return response.json as ServerAuthConfig;
   }
 
-  async loginPassword(username: string, password: string, setup: boolean): Promise<void> {
+  async loginPassword(username: string, password: string, setup: boolean, setupToken?: string): Promise<void> {
     if (!this.settings.serverUrl) throw new Error("Set a sync server URL before logging in");
     assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    const requestBody: { username: string; password: string; setupToken?: string } = { username, password };
+    if (setup && setupToken) requestBody.setupToken = setupToken;
     const response = await requestUrl({
       url: `${serverUrl}/v1/auth/password/${setup ? "setup" : "login"}`,
       method: "POST",
       contentType: "application/json",
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify(requestBody),
       throw: false
     });
     if (response.status < 200 || response.status >= 300) {

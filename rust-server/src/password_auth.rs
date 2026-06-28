@@ -19,6 +19,7 @@ const MIN_PASSWORD_BYTES: usize = 12;
 #[derive(Debug)]
 pub struct PasswordAuth {
     user: String,
+    setup_token_hash: Option<String>,
     store_path: PathBuf,
     lock: Mutex<()>,
 }
@@ -44,10 +45,20 @@ struct PasswordSessionRecord {
 }
 
 impl PasswordAuth {
-    pub fn new(user: String, data_dir: impl Into<PathBuf>) -> Result<Self> {
+    pub fn new(
+        user: String,
+        data_dir: impl Into<PathBuf>,
+        setup_token: Option<String>,
+    ) -> Result<Self> {
         let user = normalize_user_claim(&user)?;
+        let setup_token_hash = setup_token
+            .as_deref()
+            .map(validate_setup_token)
+            .transpose()?
+            .map(hash_token);
         Ok(Self {
             user,
+            setup_token_hash,
             store_path: data_dir.into().join("auth/password.json"),
             lock: Mutex::new(()),
         })
@@ -61,8 +72,10 @@ impl PasswordAuth {
         &self,
         username: &str,
         password: &str,
+        setup_token: Option<&str>,
     ) -> Result<PasswordAuthSession> {
         let _guard = self.lock.lock().await;
+        self.verify_setup_token(setup_token)?;
         self.ensure_setup_user(username)?;
         validate_password(password)?;
 
@@ -75,6 +88,10 @@ impl PasswordAuth {
         let session = self.issue_session(&mut store)?;
         self.write_store(&store).await?;
         Ok(session)
+    }
+
+    pub fn setup_token_is_required(&self) -> bool {
+        self.setup_token_hash.is_some()
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Result<PasswordAuthSession> {
@@ -147,6 +164,23 @@ impl PasswordAuth {
         }
     }
 
+    fn verify_setup_token(&self, setup_token: Option<&str>) -> Result<()> {
+        let Some(expected_hash) = &self.setup_token_hash else {
+            return Ok(());
+        };
+        let token = setup_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("password setup token is required"))?;
+        validate_setup_token(token)?;
+        let token_hash = hash_token(token);
+        if constant_time_eq(&token_hash, expected_hash) {
+            Ok(())
+        } else {
+            bail!("invalid password setup token")
+        }
+    }
+
     async fn read_store(&self) -> Result<PasswordStore> {
         match fs::read_to_string(&self.store_path).await {
             Ok(contents) => {
@@ -185,6 +219,13 @@ fn validate_password(password: &str) -> Result<()> {
         bail!("password must be at least {MIN_PASSWORD_BYTES} bytes");
     }
     Ok(())
+}
+
+fn validate_setup_token(token: &str) -> Result<&str> {
+    if token.trim() != token || token.len() < 16 || token.chars().any(char::is_whitespace) {
+        bail!("invalid password setup token")
+    }
+    Ok(token)
 }
 
 fn hash_password(password: &str) -> Result<String> {

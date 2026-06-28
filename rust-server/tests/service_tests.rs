@@ -442,6 +442,137 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
 }
 
 #[tokio::test]
+async fn password_setup_requires_bootstrap_token_when_configured() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let app = router(
+        AppState {
+            vaults: VaultService::new(data_dir.clone()),
+            auth: AuthVerifier::password_with_setup_token(
+                "Alice@example.com".to_string(),
+                data_dir,
+                Some("setup-token-123456".to_string()),
+            )
+            .unwrap(),
+            public_auth: PublicAuthConfig::Password,
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let config = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/auth/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let config_body = response_json(config).await;
+    assert_eq!(config_body["setupTokenRequired"], true);
+
+    let setup_without_token = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "correct-horse-battery-staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup_without_token.status(), StatusCode::BAD_REQUEST);
+
+    let setup_with_token = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "correct-horse-battery-staple",
+                        "setupToken": "setup-token-123456"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup_with_token.status(), StatusCode::OK);
+    let setup_body = response_json(setup_with_token).await;
+    assert_eq!(setup_body["user"], "alice");
+}
+
+#[tokio::test]
+async fn password_endpoints_are_disabled_outside_password_mode() {
+    let root = tempfile::tempdir().unwrap();
+    let data_dir = root.path().join("data");
+    let app = router(
+        AppState {
+            vaults: VaultService::new(data_dir.clone()),
+            auth: AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
+            public_auth: PublicAuthConfig::Token,
+        },
+        1024 * 1024,
+        Vec::new(),
+    );
+
+    let setup = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "correct-horse-battery-staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(setup.status(), StatusCode::BAD_REQUEST);
+
+    let login = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/password/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "alice",
+                        "password": "correct-horse-battery-staple"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn http_rejects_oversized_sync_bodies() {
     let root = tempfile::tempdir().unwrap();
     let app = router(

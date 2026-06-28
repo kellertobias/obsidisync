@@ -45,6 +45,8 @@ enum PublicAuthConfigResponse {
     Password {
         #[serde(rename = "passwordConfigured")]
         password_configured: bool,
+        #[serde(rename = "setupTokenRequired")]
+        setup_token_required: bool,
     },
     Oidc {
         issuer: String,
@@ -180,6 +182,7 @@ fn is_public_client_error(message: &str) -> bool {
         || message.starts_with("git remote ")
         || message.starts_with("OIDC user claim cannot be used")
         || message.starts_with("password must")
+        || message.starts_with("password setup token is required")
         || message.starts_with("password is already set")
         || message.starts_with("password confirmation")
 }
@@ -189,6 +192,8 @@ fn is_public_client_error(message: &str) -> bool {
 struct PasswordAuthRequest {
     username: String,
     password: String,
+    #[serde(default, rename = "setupToken")]
+    setup_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +201,7 @@ struct PasswordLoginForm {
     username: String,
     password: String,
     password_confirm: Option<String>,
+    setup_token: Option<String>,
 }
 
 async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
@@ -203,7 +209,14 @@ async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String
         return Ok(Html(render_home_page(&state.public_auth)));
     }
     let configured = state.auth.password_is_configured().await?;
-    Ok(Html(render_password_page(configured, None, None, &[])))
+    let setup_token_required = state.auth.password_setup_token_is_required()?;
+    Ok(Html(render_password_page(
+        configured,
+        setup_token_required,
+        None,
+        None,
+        &[],
+    )))
 }
 
 async fn password_form(
@@ -225,7 +238,7 @@ async fn password_form(
     } else {
         state
             .auth
-            .setup_password(&form.username, &form.password)
+            .setup_password(&form.username, &form.password, form.setup_token.as_deref())
             .await
     };
 
@@ -241,6 +254,7 @@ async fn password_form(
                 let feed = state.vaults.activity_feed(&session.user, 50).await?;
                 Ok(Html(render_password_page(
                     true,
+                    state.auth.password_setup_token_is_required()?,
                     Some(format!("Access token created for {}.", session.user)),
                     Some(session.access_token.clone()),
                     &feed,
@@ -250,6 +264,7 @@ async fn password_form(
         }
         Err(error) => Ok(Html(render_password_page(
             configured,
+            state.auth.password_setup_token_is_required()?,
             Some(error.to_string()),
             None,
             &[],
@@ -277,10 +292,17 @@ async fn setup_password(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PasswordAuthRequest>,
 ) -> Result<Json<crate::password_auth::PasswordAuthSession>, ApiError> {
+    if !matches!(state.public_auth, PublicAuthConfig::Password) {
+        return Err(ApiError(anyhow::anyhow!("password login is not enabled")));
+    }
     Ok(Json(
         state
             .auth
-            .setup_password(&request.username, &request.password)
+            .setup_password(
+                &request.username,
+                &request.password,
+                request.setup_token.as_deref(),
+            )
             .await?,
     ))
 }
@@ -289,6 +311,9 @@ async fn login_password(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PasswordAuthRequest>,
 ) -> Result<Json<crate::password_auth::PasswordAuthSession>, ApiError> {
+    if !matches!(state.public_auth, PublicAuthConfig::Password) {
+        return Err(ApiError(anyhow::anyhow!("password login is not enabled")));
+    }
     Ok(Json(
         state
             .auth
@@ -303,6 +328,7 @@ async fn auth_config(
     let response = match &state.public_auth {
         PublicAuthConfig::Password => PublicAuthConfigResponse::Password {
             password_configured: state.auth.password_is_configured().await?,
+            setup_token_required: state.auth.password_setup_token_is_required()?,
         },
         PublicAuthConfig::Oidc {
             issuer,
@@ -394,6 +420,7 @@ async fn auth_session(
 
 fn render_password_page(
     configured: bool,
+    setup_token_required: bool,
     message: Option<String>,
     token: Option<String>,
     feed: &[ActivityFeedEntry],
@@ -408,6 +435,11 @@ fn render_password_page(
         String::new()
     } else {
         r#"<label>Confirm password<input name="password_confirm" type="password" autocomplete="new-password" required></label>"#.to_string()
+    };
+    let setup_token_field = if configured || !setup_token_required {
+        String::new()
+    } else {
+        r#"<label>Setup token<input name="setup_token" type="password" autocomplete="one-time-code" required></label>"#.to_string()
     };
     let autocomplete = if configured {
         "current-password"
@@ -463,6 +495,7 @@ button {{ cursor: pointer; font-weight: 700; }}
 <label>Username<input name="username" type="text" autocomplete="username" required autofocus></label>
 <label>{password_label}<input name="password" type="password" autocomplete="{autocomplete}" required></label>
 {confirm_field}
+{setup_token_field}
 <button type="submit">{title}</button>
 </form>
 {token_html}

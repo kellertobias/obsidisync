@@ -1,4 +1,6 @@
 use anyhow::{bail, Result};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use obsidian_git_sync_server::auth::AuthVerifier;
 use obsidian_git_sync_server::http::{router, AppState, PublicAuthConfig};
 use obsidian_git_sync_server::remote::RemotePolicy;
@@ -55,6 +57,7 @@ impl RuntimeConfig {
         );
 
         let (auth, public_auth) = if let Ok(token) = std::env::var("OBSIDIAN_GIT_SYNC_DEV_TOKEN") {
+            let token = non_empty_env_value("OBSIDIAN_GIT_SYNC_DEV_TOKEN", token)?;
             let user =
                 std::env::var("OBSIDIAN_GIT_SYNC_DEV_USER").unwrap_or_else(|_| "dev".to_string());
             (
@@ -62,8 +65,13 @@ impl RuntimeConfig {
                 PublicAuthConfig::Token,
             )
         } else if let Some(user) = password_user_env() {
+            let setup_token = password_setup_token()?;
+            tracing::warn!(
+                "password mode first-time setup requires OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN or this generated setup token: {}",
+                setup_token
+            );
             (
-                AuthVerifier::password(user, data_dir.clone())?,
+                AuthVerifier::password_with_setup_token(user, data_dir.clone(), Some(setup_token))?,
                 PublicAuthConfig::Password,
             )
         } else {
@@ -119,6 +127,31 @@ fn password_user_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn password_setup_token() -> Result<String> {
+    match std::env::var("OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN") {
+        Ok(value) => non_empty_env_value("OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN", value),
+        Err(_) => random_setup_token(),
+    }
+}
+
+fn non_empty_env_value(name: &str, value: String) -> Result<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        bail!("{name} must not be empty");
+    }
+    if value.chars().any(char::is_whitespace) {
+        bail!("{name} must not contain whitespace");
+    }
+    Ok(value)
+}
+
+fn random_setup_token() -> Result<String> {
+    let mut token = [0_u8; 32];
+    getrandom::fill(&mut token)
+        .map_err(|error| anyhow::anyhow!("random generator failed: {error}"))?;
+    Ok(URL_SAFE_NO_PAD.encode(token))
 }
 
 fn required_env(name: &str) -> Result<String> {

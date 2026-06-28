@@ -34,6 +34,7 @@ docker run --rm \
   -p 8787:8787 \
   -v obsidian-git-sync-data:/data \
   -e OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice" \
+  -e OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN="replace-with-a-long-random-token" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
   obsidian-git-sync-server
 ```
@@ -191,13 +192,14 @@ Single-user password mode without SSO:
 
 ```bash
 export OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice"
+export OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN="replace-with-a-long-random-token"
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
 export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
 export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" # only needed when using network remotes
 npm run start:server
 ```
 
-Then click **Log in** in the Obsidian plugin settings. On the first login, the plugin sets the password through the server; later logins use the same button and store the returned access token automatically. The web `/login` page remains available for browser access to the change feed and manual token recovery. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
+Then click **Log in** in the Obsidian plugin settings. On the first login, the plugin asks for the setup token and sets the password through the server; later logins use the same button and store the returned access token automatically. If `OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN` is not set, the server generates a random setup token and logs it at startup. The web `/login` page remains available for browser access to the change feed and manual token recovery. `OBSIDIAN_GIT_SYNC_USER` is accepted as a shorter alias for `OBSIDIAN_GIT_SYNC_PASSWORD_USER`.
 
 After logging in, the page also shows a recent change feed for the user's synced vaults.
 
@@ -233,6 +235,7 @@ Security defaults:
 
 - OIDC issuer/JWKS URLs must use HTTPS, except localhost development URLs.
 - Password mode stores an Argon2 password hash and hashed access tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json`.
+- First-time password setup requires `OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN` or the generated setup token printed in server logs.
 - Plugin server/OIDC URLs must use HTTPS, except localhost development URLs.
 - Leaving the Git remote URL blank is allowed and selects server-local Git storage in `OBSIDIAN_GIT_SYNC_DATA_DIR`.
 - Git remotes must use HTTPS or SSH. Local paths and `file://` remotes are disabled unless `OBSIDIAN_GIT_SYNC_ALLOW_LOCAL_REMOTES=true`.
@@ -270,7 +273,7 @@ The plugin always registers vaults on the `main` branch and uses the persistent 
 The plugin only needs the sync server URL to start login:
 
 1. The plugin calls `GET /v1/auth/config`.
-2. In password mode, the plugin shows a username/password form and calls `/v1/auth/password/login` or `/v1/auth/password/setup`.
+2. In password mode, the plugin shows a username/password form and calls `/v1/auth/password/login` or `/v1/auth/password/setup`. First-time setup also requires the setup token.
 3. In OIDC mode, the server returns the public device-flow client configuration, and the plugin performs device login with the issuer advertised by the server.
 4. The plugin stores the returned access token and calls `GET /v1/auth/session` to set the user namespace.
 

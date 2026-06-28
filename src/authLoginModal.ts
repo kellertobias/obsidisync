@@ -41,6 +41,7 @@ export class AuthLoginModal extends Modal {
     let username = "";
     let password = "";
     let passwordConfirm = "";
+    let setupToken = "";
 
     new Setting(contentEl).setName("Username").addText((text) =>
       text.setPlaceholder("alice").onChange((value) => {
@@ -62,6 +63,14 @@ export class AuthLoginModal extends Modal {
           passwordConfirm = value;
         });
       });
+      if (config.setupTokenRequired) {
+        new Setting(contentEl).setName("Setup token").addText((text) => {
+          text.inputEl.type = "password";
+          text.onChange((value) => {
+            setupToken = value.trim();
+          });
+        });
+      }
     }
 
     new Setting(contentEl).addButton((button) =>
@@ -75,8 +84,11 @@ export class AuthLoginModal extends Modal {
             if (!config.passwordConfigured && passwordConfirm !== password) {
               throw new Error("Password confirmation does not match");
             }
+            if (!config.passwordConfigured && config.setupTokenRequired && !setupToken) {
+              throw new Error("Enter the setup token");
+            }
             button.setDisabled(true);
-            await this.gitService.loginPassword(username, password, !config.passwordConfigured);
+            await this.gitService.loginPassword(username, password, !config.passwordConfigured, setupToken);
             await this.complete("Login complete");
           } catch (error) {
             button.setDisabled(false);
