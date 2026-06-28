@@ -330,7 +330,10 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(site_cookie.starts_with("obsidisync_session="), "{site_cookie}");
+    assert!(
+        site_cookie.starts_with("obsidisync_session="),
+        "{site_cookie}"
+    );
     assert!(site_cookie.contains("Path=/"), "{site_cookie}");
     assert!(site_cookie.contains("Max-Age=43200"), "{site_cookie}");
     assert!(site_cookie.contains("HttpOnly"), "{site_cookie}");
