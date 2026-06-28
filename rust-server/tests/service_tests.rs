@@ -108,7 +108,7 @@ async fn server_info_reports_api_compatibility() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["name"], "obsync-server");
+    assert_eq!(body["name"], "obsidisync-server");
     assert_eq!(body["apiVersion"], 1);
     assert_eq!(body["minClientApiVersion"], 1);
     assert!(body["version"].as_str().is_some());
@@ -330,7 +330,7 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(site_cookie.starts_with("obsync_session="), "{site_cookie}");
+    assert!(site_cookie.starts_with("obsidisync_session="), "{site_cookie}");
     assert!(site_cookie.contains("Path=/"), "{site_cookie}");
     assert!(site_cookie.contains("Max-Age=43200"), "{site_cookie}");
     assert!(site_cookie.contains("HttpOnly"), "{site_cookie}");

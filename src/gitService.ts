@@ -490,7 +490,7 @@ export class GitService {
           return response.json as T;
         }
       }
-      throw new Error("Login expired or unauthorized. Log in to Obsync again.");
+      throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
     }
 
     if (response.status < 200 || response.status >= 300) {
@@ -526,7 +526,7 @@ export class GitService {
           return response.json as T;
         }
       }
-      throw new Error("Login expired or unauthorized. Log in to Obsync again.");
+      throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
     }
 
     if (response.status < 200 || response.status >= 300) {

@@ -27,7 +27,7 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
   assert.match(serviceSource, /grant_type", "refresh_token"/);
   assert.match(serviceSource, /\/v1\/server\/info/);
-  assert.match(serviceSource, /Login expired or unauthorized\. Log in to Obsync again\./);
+  assert.match(serviceSource, /Login expired or unauthorized\. Log in to ObsidiSync again\./);
   assert.match(settingsSource, /setButtonText\("Check"\)/);
 });
 

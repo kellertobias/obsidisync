@@ -6,7 +6,7 @@ test("ignores git internals and plugin-owned state", () => {
   for (const path of [
     ".git/config",
     ".obsidian-git-sync/state.json",
-    "Obsync History/abc123-Note.md",
+    "ObsidiSync History/abc123-Note.md",
     ".trash/deleted.md",
     ".obsidian/cache/index.json",
     ".obsidian/plugins/ios-git-sync/main.js"

@@ -1,4 +1,4 @@
-# Obsync for Obsidian
+# ObsidiSync for Obsidian
 
 This project contains:
 
@@ -15,9 +15,9 @@ The Rust server validates the bearer token, authorizes the `{user}` namespace, c
 
 ## Installation overview
 
-Obsync is not registered in the Obsidian community plugin registry yet. It will not appear in **Settings -> Community plugins -> Browse**. On iOS, install it from GitHub with BRAT, or use the manual file-copy fallback below.
+ObsidiSync is not registered in the Obsidian community plugin registry yet. It will not appear in **Settings -> Community plugins -> Browse**. On iOS, install it from GitHub with BRAT, or use the manual file-copy fallback below.
 
-The plugin also requires the Obsync sync server. The iOS app does not run Git and cannot sync by itself; it sends vault changes to the server, and the server performs Git commits, rebases, pushes, conflict handling, and file history lookups. Build and deploy the Docker container before configuring the plugin on iOS.
+The plugin also requires the ObsidiSync sync server. The iOS app does not run Git and cannot sync by itself; it sends vault changes to the server, and the server performs Git commits, rebases, pushes, conflict handling, and file history lookups. Build and deploy the Docker container before configuring the plugin on iOS.
 
 ### 1. Deploy the sync server
 
@@ -45,7 +45,7 @@ Use OIDC instead of password mode by setting the OIDC environment variables show
 
 ### 2. Install from GitHub on iOS with BRAT
 
-BRAT is the recommended way to install Obsync on iOS before it is accepted into the official Obsidian community plugin registry.
+BRAT is the recommended way to install ObsidiSync on iOS before it is accepted into the official Obsidian community plugin registry.
 
 1. Open Obsidian on iOS.
 2. Go to **Settings -> Community plugins -> Browse**.
@@ -72,13 +72,13 @@ main.js
 manifest.json
 ```
 
-After BRAT installs Obsync, enable **Obsync** under:
+After BRAT installs ObsidiSync, enable **ObsidiSync** under:
 
 ```text
 Settings -> Community plugins -> Installed plugins
 ```
 
-Then configure the sync server URL and click **Log in** in the Obsync settings.
+Then configure the sync server URL and click **Log in** in the ObsidiSync settings.
 
 ### 3. Manual install fallback
 
@@ -122,13 +122,13 @@ YourVault/
 
 The easiest way on iOS is usually to place the files from macOS into an iCloud Drive vault, then let iCloud sync them to the device. You can also use another file sync method that preserves the `.obsidian/plugins/ios-git-sync/` path.
 
-After the files are on the device, open Obsidian on iOS and enable **Obsync** under:
+After the files are on the device, open Obsidian on iOS and enable **ObsidiSync** under:
 
 ```text
 Settings -> Community plugins -> Installed plugins
 ```
 
-Then configure the sync server URL and click **Log in** in the Obsync settings.
+Then configure the sync server URL and click **Log in** in the ObsidiSync settings.
 
 ## Storage model
 
@@ -296,7 +296,7 @@ The settings page shows:
 
 Use the **Check** button in the Server setting to verify server compatibility and the current authenticated session without starting a sync.
 
-If a sync is requested while another sync is running, Obsync queues one follow-up sync and runs it immediately after the current sync finishes. If the server returns `401` or `403`, Obsync attempts one OIDC refresh-token exchange when a refresh token is available. If refresh fails or no refresh token exists, log in again from Obsync settings.
+If a sync is requested while another sync is running, ObsidiSync queues one follow-up sync and runs it immediately after the current sync finishes. If the server returns `401` or `403`, ObsidiSync attempts one OIDC refresh-token exchange when a refresh token is available. If refresh fails or no refresh token exists, log in again from ObsidiSync settings.
 
 ### Login flow
 
@@ -322,7 +322,7 @@ The plugin adds:
 - **Show current file versions**
 - **Resolve current conflict file**
 - **Sync now**
-- **Log in to Obsync**
+- **Log in to ObsidiSync**
 
 The version modal lists commits for the active file, previews selected versions read-only, copies text versions, and can replace the current file with a selected version.
 
@@ -335,7 +335,7 @@ The server uses:
 
 If a conflict remains, the plugin receives conflict-marker content and writes it into the file. This works on mobile because the user resolves the file inside Obsidian, then runs **Resolve current conflict file** or syncs again.
 
-The sidebar file-history view shows a **Resolve** action next to **Sync** when the current file contains conflict markers. Closing the resolver refreshes open Obsync history views and the mobile sync indicator.
+The sidebar file-history view shows a **Resolve** action next to **Sync** when the current file contains conflict markers. Closing the resolver refreshes open ObsidiSync history views and the mobile sync indicator.
 
 ## Backup and restore
 
@@ -358,7 +358,7 @@ Restore procedure:
 1. Stop the server.
 2. Restore the full data directory to the configured `OBSIDIAN_GIT_SYNC_DATA_DIR`.
 3. Start the server.
-4. Open Obsync settings, verify the server version is shown, then run a manual sync from one client.
+4. Open ObsidiSync settings, verify the server version is shown, then run a manual sync from one client.
 
 Do not restore only the Git repository without the binary object store. Binary file version retrieval depends on the `binary` directory retaining objects referenced by Git metadata.
 

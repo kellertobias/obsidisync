@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-const SITE_SESSION_COOKIE: &str = "obsync_session";
+const SITE_SESSION_COOKIE: &str = "obsidisync_session";
 const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
 
@@ -155,7 +155,7 @@ async fn home_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, A
 
 async fn server_info() -> Json<ServerInfoResponse> {
     Json(ServerInfoResponse {
-        name: "obsync-server",
+        name: "obsidisync-server",
         version: env!("CARGO_PKG_VERSION"),
         api_version: SERVER_API_VERSION,
         min_client_api_version: MIN_CLIENT_API_VERSION,
@@ -488,7 +488,7 @@ fn render_password_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} - Obsync</title>
+<title>{title} - ObsidiSync</title>
 <style>
 :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
 body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: Canvas; color: CanvasText; }}
@@ -535,7 +535,7 @@ fn render_change_feed_page(user: &str, feed: &[ActivityFeedEntry]) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Change feed - Obsync</title>
+<title>Change feed - ObsidiSync</title>
 <style>
 :root {{ color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
 body {{ margin: 0; min-height: 100vh; background: Canvas; color: CanvasText; }}

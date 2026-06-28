@@ -1,5 +1,5 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
-import ObsyncPlugin from "./main";
+import ObsidiSyncPlugin from "./main";
 import { ManifestEntry } from "./protocol";
 
 export interface IosGitSyncSettings {
@@ -84,10 +84,10 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
 };
 
 export class IosGitSyncSettingTab extends PluginSettingTab {
-  plugin: ObsyncPlugin;
+  plugin: ObsidiSyncPlugin;
   private serverRefreshRequest = 0;
 
-  constructor(app: App, plugin: ObsyncPlugin) {
+  constructor(app: App, plugin: ObsidiSyncPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }

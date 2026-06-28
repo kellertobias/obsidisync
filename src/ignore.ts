@@ -1,4 +1,4 @@
-export const HISTORY_SNAPSHOT_DIR = "Obsync History";
+export const HISTORY_SNAPSHOT_DIR = "ObsidiSync History";
 
 export function shouldIgnoreVaultPath(path: string): boolean {
   const normalized = path.replace(/\\/g, "/").replace(/^\/+/, "");

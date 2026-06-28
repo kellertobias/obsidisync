@@ -5,7 +5,7 @@ import { HISTORY_SNAPSHOT_DIR } from "./ignore";
 import { HistoryEntry } from "./protocol";
 import { sha256Hex } from "./vaultState";
 
-export const FILE_HISTORY_VIEW_TYPE = "obsync-file-history";
+export const FILE_HISTORY_VIEW_TYPE = "obsidisync-file-history";
 
 type SyncState = "up-to-date" | "local-changes" | "server-newer" | "not-synced" | "unknown";
 
@@ -62,7 +62,7 @@ export class FileHistoryView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Obsync file history";
+    return "ObsidiSync file history";
   }
 
   getIcon(): string {

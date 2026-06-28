@@ -16,7 +16,7 @@ export class AuthLoginModal extends Modal {
   async onOpen(): Promise<void> {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Log in to Obsync" });
+    contentEl.createEl("h2", { text: "Log in to ObsidiSync" });
     this.statusEl = contentEl.createEl("p", { text: "Loading login configuration..." });
 
     try {
@@ -36,7 +36,7 @@ export class AuthLoginModal extends Modal {
   private renderPassword(config: Extract<ServerAuthConfig, { type: "password" }>): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: config.passwordConfigured ? "Log in to Obsync" : "Set Obsync password" });
+    contentEl.createEl("h2", { text: config.passwordConfigured ? "Log in to ObsidiSync" : "Set ObsidiSync password" });
 
     let username = "";
     let password = "";
@@ -103,7 +103,7 @@ export class AuthLoginModal extends Modal {
   private async startOidc(): Promise<void> {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Log in to Obsync" });
+    contentEl.createEl("h2", { text: "Log in to ObsidiSync" });
     this.statusEl = contentEl.createEl("p", { text: "Starting device login..." });
 
     this.authorization = await this.gitService.beginOidcDeviceLogin();
@@ -116,7 +116,7 @@ export class AuthLoginModal extends Modal {
     if (!this.authorization) return;
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h2", { text: "Log in to Obsync" });
+    contentEl.createEl("h2", { text: "Log in to ObsidiSync" });
     contentEl.createEl("p", { text: "Open the verification URL and enter the code." });
     contentEl.createEl("p", { text: this.authorization.verification_uri_complete || this.authorization.verification_uri });
     contentEl.createEl("h3", { text: this.authorization.user_code });

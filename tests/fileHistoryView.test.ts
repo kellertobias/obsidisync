@@ -5,13 +5,13 @@ import { join } from "node:path";
 
 const root = process.cwd();
 
-test("plugin registers a dockable Obsync file history view", () => {
+test("plugin registers a dockable ObsidiSync file history view", () => {
   const mainSource = readFileSync(join(root, "src", "main.ts"), "utf8");
   const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
 
   assert.match(viewSource, /extends ItemView/);
-  assert.match(viewSource, /FILE_HISTORY_VIEW_TYPE = "obsync-file-history"/);
-  assert.match(viewSource, /getDisplayText\(\): string \{\s*return "Obsync file history";/);
+  assert.match(viewSource, /FILE_HISTORY_VIEW_TYPE = "obsidisync-file-history"/);
+  assert.match(viewSource, /getDisplayText\(\): string \{\s*return "ObsidiSync file history";/);
   assert.match(mainSource, /registerView\(\s*FILE_HISTORY_VIEW_TYPE/);
   assert.match(mainSource, /getLeavesOfType\(FILE_HISTORY_VIEW_TYPE\)/);
   assert.match(mainSource, /activeFilePath/);

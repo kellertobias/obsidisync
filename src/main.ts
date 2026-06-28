@@ -10,7 +10,7 @@ import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 import { sha256Hex } from "./vaultState";
 
-export default class ObsyncPlugin extends Plugin {
+export default class ObsidiSyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
   private gitService: GitService;
   private timer: number | null = null;
@@ -89,7 +89,7 @@ export default class ObsyncPlugin extends Plugin {
 
     this.addCommand({
       id: "login",
-      name: "Log in to Obsync",
+      name: "Log in to ObsidiSync",
       callback: () => this.openLoginModal()
     });
 
@@ -162,7 +162,7 @@ export default class ObsyncPlugin extends Plugin {
   checkConnection(): void {
     this.runCommand(async () => {
       const info = await this.refreshConnectionStatus();
-      new Notice(`Obsync server ${info.version} is reachable`);
+      new Notice(`ObsidiSync server ${info.version} is reachable`);
     });
   }
 
@@ -200,7 +200,7 @@ export default class ObsyncPlugin extends Plugin {
 
     const styleEl = document.createElement("style");
     styleEl.textContent = `
-      .obsync-mobile-sync-indicator {
+      .obsidisync-mobile-sync-indicator {
         align-items: center;
         color: var(--text-muted);
         cursor: pointer;
@@ -220,13 +220,13 @@ export default class ObsyncPlugin extends Plugin {
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      .obsync-mobile-sync-indicator-row {
+      .obsidisync-mobile-sync-indicator-row {
         display: block;
         max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .obsync-mobile-sync-indicator-state {
+      .obsidisync-mobile-sync-indicator-state {
         color: var(--text-faint);
         font-size: 10px;
         text-transform: lowercase;
@@ -317,7 +317,7 @@ export default class ObsyncPlugin extends Plugin {
       if (!(await this.fileHasLocalChanges(path))) return;
       await this.runCommand(() => this.syncNow());
     } catch (error) {
-      console.error("Obsync close sync failed", error);
+      console.error("ObsidiSync close sync failed", error);
     }
   }
 
@@ -348,8 +348,8 @@ export default class ObsyncPlugin extends Plugin {
       if (requestId !== this.mobileSyncIndicatorRequestId) return;
       const label = savedState === "changes" ? "Changed" : formatMobileSyncDate(this.settings.lastSyncedAt);
       this.clearMobileSyncIndicator(indicator);
-      indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row", text: label });
-      indicator.createSpan({ cls: "obsync-mobile-sync-indicator-row obsync-mobile-sync-indicator-state", text: savedState });
+      indicator.createSpan({ cls: "obsidisync-mobile-sync-indicator-row", text: label });
+      indicator.createSpan({ cls: "obsidisync-mobile-sync-indicator-row obsidisync-mobile-sync-indicator-state", text: savedState });
       indicator.style.display = "inline-flex";
       indicator.setAttribute("aria-hidden", "false");
       indicator.setAttribute("aria-label", `Last synced ${label}; ${savedState}`);
@@ -399,10 +399,10 @@ export default class ObsyncPlugin extends Plugin {
 
     this.mobileSyncIndicatorEl?.remove();
     const indicator = document.createElement("div");
-    indicator.className = "obsync-mobile-sync-indicator";
+    indicator.className = "obsidisync-mobile-sync-indicator";
     indicator.tabIndex = 0;
     indicator.setAttribute("role", "button");
-    indicator.setAttribute("aria-label", "Obsync sync status");
+    indicator.setAttribute("aria-label", "ObsidiSync sync status");
     indicator.onclick = (event) => {
       void this.openSyncMenu(event);
     };
@@ -467,7 +467,7 @@ export default class ObsyncPlugin extends Plugin {
     menu.addSeparator();
     menu.addItem((item) =>
       item
-        .setTitle("Log in to Obsync")
+        .setTitle("Log in to ObsidiSync")
         .setIcon("log-in")
         .onClick(() => this.openLoginModal())
     );
@@ -586,12 +586,12 @@ export default class ObsyncPlugin extends Plugin {
     try {
       await operation();
     } catch (error) {
-      console.error("iOS Git Sync error", error);
+      console.error("ObsidiSync error", error);
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("CONFLICT") || message.toLowerCase().includes("conflict")) {
         new Notice("Git conflict detected. Resolve conflict markers, then run sync again.", 15000);
       } else {
-        new Notice(`Obsync error: ${message}`, 10000);
+        new Notice(`ObsidiSync error: ${message}`, 10000);
       }
     }
   }
