@@ -1068,6 +1068,33 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
         "server repo should be clean after returning conflict"
     );
 
+    let blocked = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: device_b.server_head.clone(),
+                changes: vec![upsert("Note.md", b"accidental follow-up\n")],
+                ..empty_sync(device_b.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, SyncStatus::Conflict);
+    assert_eq!(blocked.conflicts[0].path, "Note.md");
+    assert!(
+        blocked.files.is_empty(),
+        "pending conflict should not overwrite the client's conflict marker file"
+    );
+
+    let clone_before_resolve = fixture.clone_remote("blocked-check").await;
+    assert_eq!(
+        fs::read_to_string(clone_before_resolve.join("Note.md"))
+            .await
+            .unwrap(),
+        "hello from A\n"
+    );
+
     let resolved = service
         .resolve(
             USER,

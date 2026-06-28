@@ -22,6 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 const UPLOAD_CHUNK_SIZE_BYTES: u64 = 512 * 1024;
+const PENDING_CONFLICTS_PATH: &str = "pending-conflicts.json";
+const PENDING_CONFLICT_REASON: &str = "file is already awaiting conflict resolution";
 
 #[derive(Debug, Clone)]
 pub struct VaultService {
@@ -260,13 +262,22 @@ impl VaultService {
             if state.uses_remote() {
                 if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .conflict_response(
+                            &user,
+                            &vault,
+                            &repo,
+                            &binary_root,
+                            base_head.as_deref(),
+                            conflicts,
+                        )
                         .await;
                 }
             }
 
             let conflicts = self
                 .apply_client_changes(
+                    &user,
+                    &vault,
                     &repo,
                     &binary_root,
                     &upload_root,
@@ -276,7 +287,14 @@ impl VaultService {
                 .await?;
             if !conflicts.is_empty() {
                 return self
-                    .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                    .conflict_response(
+                        &user,
+                        &vault,
+                        &repo,
+                        &binary_root,
+                        base_head.as_deref(),
+                        conflicts,
+                    )
                     .await;
             }
 
@@ -293,12 +311,26 @@ impl VaultService {
                 self.fetch(&repo).await?;
                 if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .conflict_response(
+                            &user,
+                            &vault,
+                            &repo,
+                            &binary_root,
+                            base_head.as_deref(),
+                            conflicts,
+                        )
                         .await;
                 }
                 if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&repo, &binary_root, base_head.as_deref(), conflicts)
+                        .conflict_response(
+                            &user,
+                            &vault,
+                            &repo,
+                            &binary_root,
+                            base_head.as_deref(),
+                            conflicts,
+                        )
                         .await;
                 }
             }
@@ -563,6 +595,7 @@ impl VaultService {
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
             let upload_root = self.upload_dir(&user, &vault);
+            let mut resolved_paths = Vec::new();
             for file in request.files {
                 let safe = validate_vault_path(&file.path)?;
                 let content = self
@@ -578,9 +611,10 @@ impl VaultService {
                 } else {
                     let mut manifest = read_manifest(&repo).await?;
                     let entry = store_binary(&binary_root, &safe, &content, 0).await?;
-                    manifest.files.insert(safe, entry);
+                    manifest.files.insert(safe.clone(), entry);
                     write_manifest(&repo, &manifest).await?;
                 }
+                resolved_paths.push(safe);
             }
             self.configure_git(&repo, &state).await?;
             self.commit_all_if_changed(
@@ -596,15 +630,17 @@ impl VaultService {
                 self.fetch(&repo).await?;
                 if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&repo, &binary_root, None, conflicts)
+                        .conflict_response(&user, &vault, &repo, &binary_root, None, conflicts)
                         .await;
                 }
                 if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&repo, &binary_root, None, conflicts)
+                        .conflict_response(&user, &vault, &repo, &binary_root, None, conflicts)
                         .await;
                 }
             }
+            self.clear_pending_conflicts(&user, &vault, &resolved_paths)
+                .await?;
             Ok(SyncResponse {
                 status: SyncStatus::Ok,
                 server_head: self.head_from_repo(&repo).await?,
@@ -708,6 +744,8 @@ impl VaultService {
 
     async fn apply_client_changes(
         &self,
+        user: &str,
+        vault: &str,
         repo: &Path,
         binary_root: &Path,
         upload_root: &Path,
@@ -715,6 +753,7 @@ impl VaultService {
         changes: &[ClientChange],
     ) -> Result<Vec<SyncConflict>> {
         let mut conflicts = Vec::new();
+        let pending_conflicts = self.read_pending_conflicts(user, vault).await?;
         let mut manifest = read_manifest(repo).await?;
         let base_manifest = match base_head {
             Some(head) => self
@@ -729,6 +768,13 @@ impl VaultService {
             match change {
                 ClientChange::Delete { path } => {
                     let safe = validate_vault_path(path)?;
+                    if pending_conflicts.contains(&safe) {
+                        conflicts.push(SyncConflict {
+                            path: safe,
+                            reason: PENDING_CONFLICT_REASON.to_string(),
+                        });
+                        continue;
+                    }
                     if is_text_or_code_path(&safe) {
                         if let Some(conflict) = apply_text_delete(repo, base_head, &safe).await? {
                             conflicts.push(conflict);
@@ -757,6 +803,13 @@ impl VaultService {
                     ..
                 } => {
                     let safe = validate_vault_path(path)?;
+                    if pending_conflicts.contains(&safe) {
+                        conflicts.push(SyncConflict {
+                            path: safe,
+                            reason: PENDING_CONFLICT_REASON.to_string(),
+                        });
+                        continue;
+                    }
                     let content = self
                         .content_from_inline_or_upload(
                             upload_root,
@@ -1006,15 +1059,20 @@ impl VaultService {
 
     async fn conflict_response(
         &self,
+        user: &str,
+        vault: &str,
         repo: &Path,
         binary_root: &Path,
         base_head: Option<&str>,
         conflicts: Vec<SyncConflict>,
     ) -> Result<SyncResponse> {
+        self.record_pending_conflicts(user, vault, &conflicts)
+            .await?;
         let conflict_paths: Vec<String> = conflicts
             .iter()
             .filter(|conflict| is_client_visible_conflict_path(&conflict.path))
             .filter(|conflict| is_text_or_code_path(&conflict.path))
+            .filter(|conflict| conflict.reason != PENDING_CONFLICT_REASON)
             .map(|conflict| conflict.path.clone())
             .collect();
         let files = match self
@@ -1138,6 +1196,73 @@ impl VaultService {
     fn upload_content_path(&self, user: &str, vault: &str, upload_id: &str) -> PathBuf {
         self.upload_dir(user, vault)
             .join(format!("{upload_id}.bin"))
+    }
+
+    fn pending_conflicts_path(&self, user: &str, vault: &str) -> PathBuf {
+        self.vault_dir(user, vault).join(PENDING_CONFLICTS_PATH)
+    }
+
+    async fn read_pending_conflicts(&self, user: &str, vault: &str) -> Result<BTreeSet<String>> {
+        let path = self.pending_conflicts_path(user, vault);
+        let bytes = match fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeSet::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let paths: Vec<String> = serde_json::from_slice(&bytes)?;
+        paths
+            .into_iter()
+            .map(|path| validate_vault_path(&path))
+            .collect()
+    }
+
+    async fn write_pending_conflicts(
+        &self,
+        user: &str,
+        vault: &str,
+        paths: &BTreeSet<String>,
+    ) -> Result<()> {
+        fs::write(
+            self.pending_conflicts_path(user, vault),
+            serde_json::to_vec_pretty(&paths.iter().collect::<Vec<_>>())?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn record_pending_conflicts(
+        &self,
+        user: &str,
+        vault: &str,
+        conflicts: &[SyncConflict],
+    ) -> Result<()> {
+        let mut pending = self.read_pending_conflicts(user, vault).await?;
+        for conflict in conflicts {
+            let path = validate_vault_path(&conflict.path)?;
+            if is_client_visible_conflict_path(&path) {
+                pending.insert(path);
+            }
+        }
+        self.write_pending_conflicts(user, vault, &pending).await
+    }
+
+    async fn clear_pending_conflicts(
+        &self,
+        user: &str,
+        vault: &str,
+        resolved_paths: &[String],
+    ) -> Result<()> {
+        let mut pending = self.read_pending_conflicts(user, vault).await?;
+        for path in resolved_paths {
+            pending.remove(path);
+        }
+        if pending.is_empty() {
+            let _ = fs::remove_file(self.pending_conflicts_path(user, vault)).await;
+            return Ok(());
+        }
+        self.write_pending_conflicts(user, vault, &pending).await
     }
 
     async fn new_upload_id(&self, upload_dir: &Path) -> Result<String> {
