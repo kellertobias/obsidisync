@@ -70,7 +70,7 @@ jobs:
 
       - name: Verify tag matches manifest version
         run: |
-          node -e "const manifest = require('./manifest.json'); if (manifest.version !== process.env.GITHUB_REF_NAME) { console.error(`Tag ${process.env.GITHUB_REF_NAME} must match manifest version ${manifest.version}`); process.exit(1); }"
+          node -e "const manifest = require('./manifest.json'); const tag = process.env.GITHUB_REF_NAME.replace(/^v/, ''); if (manifest.version !== tag) { console.error(`Tag ${process.env.GITHUB_REF_NAME} must match manifest version ${manifest.version}`); process.exit(1); }"
 
       - name: Build plugin
         run: npm run build:plugin
@@ -78,9 +78,55 @@ jobs:
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" main.js manifest.json --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" main.js manifest.json --title "$GITHUB_REF_NAME" --notes "Obsidian plugin release $GITHUB_REF_NAME"
+          if [ "$GITHUB_SERVER_URL" = "https://github.com" ]; then
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" main.js manifest.json --clobber
+            else
+              gh release create "$GITHUB_REF_NAME" main.js manifest.json --title "$GITHUB_REF_NAME" --notes "Obsidian plugin release $GITHUB_REF_NAME"
+            fi
+            exit 0
           fi
+
+          api="${GITHUB_SERVER_URL%/}/api/v1"
+          repo="$GITHUB_REPOSITORY"
+          auth_header="Authorization: token $GITHUB_TOKEN"
+          release_json="$(mktemp)"
+
+          status="$(
+            curl -sS -o "$release_json" -w "%{http_code}" \
+              -H "$auth_header" \
+              "$api/repos/$repo/releases/tags/$GITHUB_REF_NAME"
+          )"
+
+          if [ "$status" = "404" ]; then
+            status="$(
+              curl -sS -o "$release_json" -w "%{http_code}" \
+                -X POST \
+                -H "$auth_header" \
+                -H "Content-Type: application/json" \
+                --data "$(node -e "console.log(JSON.stringify({ tag_name: process.env.GITHUB_REF_NAME, name: process.env.GITHUB_REF_NAME, body: 'Obsidian plugin release ' + process.env.GITHUB_REF_NAME }))")" \
+                "$api/repos/$repo/releases"
+            )"
+          fi
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            cat "$release_json"
+            exit 1
+          fi
+
+          release_id="$(node -e "console.log(require(process.argv[1]).id)" "$release_json")"
+          for asset in main.js manifest.json; do
+            node -e "const release = require(process.argv[1]); const name = process.argv[2]; for (const asset of release.assets || []) if (asset.name === name) console.log(asset.id)" "$release_json" "$asset" |
+              while read -r asset_id; do
+                [ -n "$asset_id" ] || continue
+                curl -fsS -X DELETE -H "$auth_header" "$api/repos/$repo/releases/assets/$asset_id"
+              done
+
+            curl -fsS \
+              -X POST \
+              -H "$auth_header" \
+              -F "attachment=@$asset" \
+              "$api/repos/$repo/releases/$release_id/assets?name=$asset"
+          done
