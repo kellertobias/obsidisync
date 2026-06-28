@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, Plugin } from "obsidian";
 import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
+import { ConflictResolverModal } from "./conflictResolverModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
 import { OidcDeviceLoginModal } from "./oidcModal";
@@ -50,13 +51,13 @@ export default class ObsyncPlugin extends Plugin {
     );
 
     this.addSettingTab(new IosGitSyncSettingTab(this.app, this));
-    this.addRibbonIcon("refresh-cw", "Sync vault", () => this.runCommand(() => this.gitService.sync()));
+    this.addRibbonIcon("refresh-cw", "Sync vault", () => this.runCommand(() => this.syncNow()));
     this.addRibbonIcon("history", "Open file history", () => this.openFileHistoryView());
 
     this.addCommand({
       id: "sync-now",
       name: "Sync now",
-      callback: () => this.runCommand(() => this.gitService.sync())
+      callback: () => this.runCommand(() => this.syncNow())
     });
 
     this.addCommand({
@@ -95,8 +96,8 @@ export default class ObsyncPlugin extends Plugin {
 
     this.addCommand({
       id: "resolve-current-conflict-file",
-      name: "Resolve current conflict file",
-      callback: () => this.resolveCurrentFile()
+      name: "Open conflict resolver",
+      callback: () => new ConflictResolverModal(this.app, this.gitService).open()
     });
 
     this.resetSyncTimer();
@@ -104,7 +105,7 @@ export default class ObsyncPlugin extends Plugin {
     if (this.settings.syncOnStartup) {
       this.app.workspace.onLayoutReady(() => {
         window.setTimeout(() => {
-          this.runCommand(() => this.gitService.sync());
+          this.runCommand(() => this.syncNow());
         }, 1500);
       });
     }
@@ -146,7 +147,7 @@ export default class ObsyncPlugin extends Plugin {
     if (!this.settings.syncIntervalMinutes || this.settings.syncIntervalMinutes < 1) return;
 
     this.timer = window.setInterval(() => {
-      this.runCommand(() => this.gitService.sync());
+      this.runCommand(() => this.syncNow());
     }, this.settings.syncIntervalMinutes * 60 * 1000);
     this.registerInterval(this.timer);
   }
@@ -156,6 +157,13 @@ export default class ObsyncPlugin extends Plugin {
     this.settings.localManifest = [];
     await this.saveSettings();
     new Notice("Local sync state reset");
+  }
+
+  private async syncNow(): Promise<void> {
+    const conflicts = await this.gitService.sync();
+    if (conflicts.length > 0) {
+      new ConflictResolverModal(this.app, this.gitService, conflicts).open();
+    }
   }
 
   private snapshotReference(path: string): HistorySnapshotReference | null {
@@ -220,15 +228,6 @@ export default class ObsyncPlugin extends Plugin {
         await view.refresh();
       }
     }
-  }
-
-  private async resolveCurrentFile(): Promise<void> {
-    const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
-    if (!file) {
-      new Notice("Open a conflict file before resolving");
-      return;
-    }
-    await this.gitService.resolveFile(file.path);
   }
 
   private async runCommand(operation: () => Promise<void>): Promise<void> {

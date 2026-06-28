@@ -5,6 +5,7 @@ import {
   RegisterRequest,
   RegisterResponse,
   ResolveRequest,
+  SyncConflict,
   SyncRequest,
   SyncResponse,
   ManifestEntry,
@@ -125,8 +126,8 @@ export class GitService {
     await this.saveSettings();
   }
 
-  async sync(): Promise<void> {
-    await this.exclusive(async () => {
+  async sync(): Promise<SyncConflict[]> {
+    const conflicts = await this.exclusive(async () => {
       this.requireConfigured();
       await this.register();
 
@@ -146,8 +147,8 @@ export class GitService {
       await vaultState.applyServerFiles(response.files);
 
       if (response.status === "conflict") {
-        new Notice(`Git sync conflict in ${response.conflicts.length} file(s). Resolve markers, then sync again.`, 15000);
-        return;
+        new Notice(`Git sync conflict in ${response.conflicts.length} file(s). Choose a resolution for each file.`, 15000);
+        return response.conflicts;
       }
 
       this.settings.serverHead = response.serverHead;
@@ -156,7 +157,9 @@ export class GitService {
       await this.saveSettings();
 
       new Notice(changes.length > 0 ? `Git sync complete: ${changes.length} local change(s)` : "Git sync complete");
+      return [];
     });
+    return conflicts ?? [];
   }
 
   async history(path?: string): Promise<HistoryEntry[]> {
@@ -189,6 +192,11 @@ export class GitService {
       await this.saveSettings();
       new Notice(response.status === "conflict" ? "Conflict remains after resolve attempt" : "Conflict resolution pushed");
     });
+  }
+
+  async resolveTextFile(path: string, content: string): Promise<void> {
+    await this.vault.adapter.write(path, content);
+    await this.resolveFile(path);
   }
 
   async beginOidcDeviceLogin(): Promise<OidcDeviceAuthorization> {
