@@ -154,6 +154,8 @@ export class GitService {
 
     const body = response.json as PasswordLoginResponse;
     this.settings.oidcAccessToken = body.accessToken;
+    this.settings.oidcRefreshToken = "";
+    this.settings.oidcAccessTokenExpiresAt = null;
     this.settings.userSlug = body.user;
     await this.saveSettings();
   }
@@ -535,16 +537,31 @@ export class GitService {
       body: params.toString(),
       throw: false
     });
-    const body = response.json as OidcTokenResponse;
+    const body = (response.json ?? {}) as OidcTokenResponse;
     if (response.status >= 200 && response.status < 300 && body.access_token) {
       await this.storeOidcTokenResponse(body);
       return true;
     }
 
-    this.settings.oidcRefreshToken = "";
-    this.settings.oidcAccessTokenExpiresAt = null;
-    await this.saveSettings();
-    return false;
+    if (body.error === "invalid_grant") {
+      this.settings.oidcRefreshToken = "";
+      this.settings.oidcAccessTokenExpiresAt = null;
+      await this.saveSettings();
+      return false;
+    }
+
+    throw new Error(body.error_description || body.error || response.text || `OIDC token refresh failed: HTTP ${response.status}`);
+  }
+
+  private async refreshExpiringOidcAccessToken(): Promise<void> {
+    if (!this.settings.oidcRefreshToken || !this.settings.oidcAccessTokenExpiresAt) return;
+
+    const expiresAt = Date.parse(this.settings.oidcAccessTokenExpiresAt);
+    if (Number.isNaN(expiresAt) || expiresAt > Date.now() + 60_000) return;
+
+    if (!(await this.refreshOidcAccessToken())) {
+      throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
+    }
   }
 
   private async uploadBuffer(path: string, buffer: ArrayBuffer, entry?: ManifestEntry): Promise<string> {
@@ -575,6 +592,7 @@ export class GitService {
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    await this.refreshExpiringOidcAccessToken();
     let response = await requestUrl({
       url: `${serverUrl}${path}`,
       method: "POST",
@@ -615,6 +633,7 @@ export class GitService {
 
   private async getJson<T>(path: string): Promise<T> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    await this.refreshExpiringOidcAccessToken();
     let response = await requestUrl({
       url: `${serverUrl}${path}`,
       method: "GET",
