@@ -284,6 +284,15 @@ The plugin always registers vaults on the `main` branch and uses the persistent 
 
 The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error.
 
+### First sync
+
+The first time a vault syncs with the server, the plugin does not merge automatically. Instead it asks how to reconcile the local vault with whatever is already on the server:
+
+- **Force push** uploads the local vault and overwrites the server so it matches this device. Anything that only exists on the server is removed. Because this destroys server data, the plugin asks for a second explicit confirmation before proceeding.
+- **Overwrite local** replaces the local files with the server's copy. Before anything is deleted, the current local files are copied to a backup folder inside the vault. The plugin proposes a default backup folder under `.obsidian-git-sync/backups/` (which is never synced); the path can be changed, or the field cleared to skip the backup.
+
+After either choice completes, normal merge-based syncing takes over. Use **Reset registration** in the advanced settings to forget the sync state and have the plugin ask again on the next sync.
+
 ### Sync status and recovery
 
 The settings page shows:

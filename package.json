@@ -1,6 +1,6 @@
 {
   "name": "obsidian-ios-git-sync",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "Obsidian sync plugin for iOS, iPadOS, and macOS plus a low-footprint server-side Git worker.",
   "main": "main.js",
   "repository": {

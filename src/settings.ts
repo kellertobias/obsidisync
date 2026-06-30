@@ -18,6 +18,7 @@ export interface IosGitSyncSettings {
   authorName: string;
   authorEmail: string;
   deviceName: string;
+  initialSyncDone: boolean;
   syncOnStartup: boolean;
   syncIntervalMinutes: number;
   clientId: string;
@@ -65,6 +66,7 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   authorName: "Obsidian Mobile",
   authorEmail: "obsidian-mobile@example.invalid",
   deviceName: "",
+  initialSyncDone: false,
   syncOnStartup: true,
   syncIntervalMinutes: 10,
   clientId: "",
@@ -243,11 +245,12 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Reset registration")
-      .setDesc("Forget the last synced commit and manifest. Local files are not changed.")
+      .setDesc("Forget the last synced commit and manifest. Local files are not changed. The next sync asks again how to reconcile this vault with the server.")
       .addButton((button) =>
         button.setButtonText("Reset").onClick(async () => {
           this.plugin.settings.serverHead = null;
           this.plugin.settings.localManifest = [];
+          this.plugin.settings.initialSyncDone = false;
           await this.plugin.saveSettings();
         })
       );

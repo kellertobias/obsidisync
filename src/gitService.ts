@@ -2,10 +2,12 @@ import { Notice, requestUrl, Vault } from "obsidian";
 import { arrayBufferToBase64 } from "./base64";
 import { diffManifests } from "./manifest";
 import {
+  ClientChange,
   HistoryEntry,
   RegisterRequest,
   RegisterResponse,
   ResolveRequest,
+  ServerFileChange,
   SyncConflict,
   SyncRequest,
   SyncResponse,
@@ -229,10 +231,120 @@ export class GitService {
     this.settings.lastSyncError = null;
     this.settings.lastSyncChangeCount = changes.length;
     this.settings.localManifest = await vaultState.computeManifest();
+    this.settings.initialSyncDone = true;
     await this.saveSettings();
 
     new Notice(changes.length > 0 ? `Git sync complete: ${changes.length} local change(s)` : "Git sync complete");
     return [];
+  }
+
+  async forcePushLocal(): Promise<void> {
+    await this.exclusive(async () => {
+      this.requireConfigured();
+      await this.checkServerCompatibility();
+      await this.register();
+
+      const vaultState = new VaultState(this.vault);
+      const probe = await this.probeServerState();
+      const serverShaByPath = new Map<string, string>();
+      for (const file of probe.files) {
+        if (file.op === "upsert") serverShaByPath.set(file.path, file.sha256);
+      }
+
+      const localManifest = await vaultState.computeManifest();
+      const localPaths = new Set(localManifest.map((entry) => entry.path));
+      const changes: ClientChange[] = [];
+
+      // Upload every local file the server does not already have byte-for-byte. Passing the
+      // real server head as the base makes the server take the client content verbatim instead
+      // of attempting a merge, so the push overwrites whatever was there.
+      for (const entry of localManifest) {
+        if (serverShaByPath.get(entry.path) === entry.sha256) continue;
+        const buffer = await this.vault.adapter.readBinary(entry.path);
+        const uploadId = await this.uploadBuffer(entry.path, buffer, entry);
+        changes.push({ path: entry.path, op: "upsert", uploadId, sha256: entry.sha256, mtime: entry.mtime });
+      }
+      for (const file of probe.files) {
+        if (file.op === "upsert" && !localPaths.has(file.path)) {
+          changes.push({ path: file.path, op: "delete" });
+        }
+      }
+
+      const request: SyncRequest = {
+        baseHead: probe.serverHead,
+        clientId: this.settings.clientId,
+        deviceName: this.deviceName(),
+        changes,
+        clientManifest: localManifest
+      };
+      const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
+      if (response.status === "conflict") {
+        throw new Error("Force push could not complete because the server changed during setup. Try again.");
+      }
+
+      const completedAt = new Date().toISOString();
+      this.settings.serverHead = response.serverHead;
+      this.settings.lastSyncedAt = completedAt;
+      this.settings.lastSyncCompletedAt = completedAt;
+      this.settings.lastSyncError = null;
+      this.settings.lastSyncChangeCount = changes.length;
+      this.settings.localManifest = await vaultState.computeManifest();
+      this.settings.initialSyncDone = true;
+      await this.saveSettings();
+
+      new Notice(`Local vault pushed to server: ${changes.length} change(s)`);
+    });
+  }
+
+  async overwriteLocalFromServer(backupFolder: string): Promise<void> {
+    await this.exclusive(async () => {
+      this.requireConfigured();
+      await this.checkServerCompatibility();
+      await this.register();
+
+      const vaultState = new VaultState(this.vault);
+      const backupTarget = backupFolder.trim();
+      const backedUp = backupTarget ? await vaultState.backupTo(backupTarget) : 0;
+
+      const probe = await this.probeServerState();
+      const serverPaths = new Set<string>();
+      for (const file of probe.files) {
+        if (file.op === "upsert") serverPaths.add(file.path);
+      }
+
+      const localManifest = await vaultState.computeManifest();
+      const deletePaths = localManifest.map((entry) => entry.path).filter((path) => !serverPaths.has(path));
+      await vaultState.deletePaths(deletePaths);
+      await vaultState.applyServerFiles(probe.files);
+
+      const completedAt = new Date().toISOString();
+      this.settings.serverHead = probe.serverHead;
+      this.settings.lastSyncedAt = completedAt;
+      this.settings.lastSyncCompletedAt = completedAt;
+      this.settings.lastSyncError = null;
+      this.settings.lastSyncChangeCount = probe.files.length;
+      this.settings.localManifest = await vaultState.computeManifest();
+      this.settings.initialSyncDone = true;
+      await this.saveSettings();
+
+      const backupNote = backedUp > 0 ? ` (${backedUp} file(s) backed up to ${backupTarget})` : "";
+      new Notice(`Local vault overwritten from server: ${probe.files.length} file(s)${backupNote}`);
+    });
+  }
+
+  // Reads the server's current head and full file list without mutating the server: an empty
+  // change set means nothing is committed or pushed, and an empty client manifest makes the
+  // server report every file it has.
+  private async probeServerState(): Promise<{ serverHead: string | null; files: ServerFileChange[] }> {
+    const request: SyncRequest = {
+      baseHead: this.settings.serverHead || null,
+      clientId: this.settings.clientId,
+      deviceName: this.deviceName(),
+      changes: [],
+      clientManifest: []
+    };
+    const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
+    return { serverHead: response.serverHead, files: response.files };
   }
 
   async history(path?: string): Promise<HistoryEntry[]> {

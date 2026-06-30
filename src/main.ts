@@ -4,6 +4,7 @@ import { ComputerNameModal } from "./computerNameModal";
 import { ConflictResolverModal } from "./conflictResolverModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService } from "./gitService";
+import { InitialSyncModal } from "./initialSyncModal";
 import { OidcDeviceLoginModal } from "./oidcModal";
 import { ServerInfoResponse, SyncConflict } from "./protocol";
 import { createClientId, generateComputerName, slugFromName } from "./runtime";
@@ -15,6 +16,7 @@ export default class ObsidiSyncPlugin extends Plugin {
   private gitService: GitService;
   private timer: number | null = null;
   private conflictResolverOpen = false;
+  private initialSyncModalOpen = false;
   private mobileSyncIndicatorEl: HTMLElement | null = null;
   private mobileSyncIndicatorRequestId = 0;
   private lastActiveFilePath: string | null = null;
@@ -490,10 +492,45 @@ export default class ObsidiSyncPlugin extends Plugin {
   }
 
   private async syncNow(): Promise<void> {
+    if (this.needsInitialSyncSetup()) {
+      this.openInitialSyncModal();
+      return;
+    }
     const conflicts = await this.gitService.sync();
     if (conflicts.length > 0) {
       this.openConflictResolver(conflicts);
     }
+  }
+
+  private needsInitialSyncSetup(): boolean {
+    return (
+      !this.settings.initialSyncDone &&
+      this.settings.serverHead === null &&
+      Boolean(this.settings.serverUrl) &&
+      Boolean(this.settings.oidcAccessToken) &&
+      Boolean(this.settings.userSlug) &&
+      Boolean(this.settings.vaultSlug)
+    );
+  }
+
+  private openInitialSyncModal(): void {
+    if (this.initialSyncModalOpen) return;
+    this.initialSyncModalOpen = true;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const defaultBackupFolder = `.obsidian-git-sync/backups/${timestamp}`;
+    new InitialSyncModal(
+      this.app,
+      defaultBackupFolder,
+      {
+        forcePush: () => this.runCommand(() => this.gitService.forcePushLocal()),
+        overwriteLocal: (backupFolder) =>
+          this.runCommand(() => this.gitService.overwriteLocalFromServer(backupFolder))
+      },
+      () => {
+        this.initialSyncModalOpen = false;
+        this.updateMobileSyncIndicator();
+      }
+    ).open();
   }
 
   private openConflictResolver(conflicts: SyncConflict[] = []): void {

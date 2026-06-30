@@ -73,6 +73,31 @@ export class VaultState {
     return entries;
   }
 
+  async backupTo(folder: string): Promise<number> {
+    const target = normalizePath(folder).replace(/\/+$/, "");
+    if (!target) throw new Error("Backup folder must not be empty");
+
+    const manifest = await this.computeManifest();
+    for (const entry of manifest) {
+      const buffer = await this.vault.adapter.readBinary(entry.path);
+      const destination = `${target}/${entry.path}`;
+      await this.ensureParentFolder(destination);
+      await this.vault.adapter.writeBinary(destination, buffer);
+    }
+    return manifest.length;
+  }
+
+  async deletePaths(paths: string[]): Promise<void> {
+    for (const path of paths) {
+      const safePath = assertSafeVaultPath(path);
+      if (shouldIgnoreVaultPath(safePath)) continue;
+      const normalizedPath = normalizePath(safePath);
+      if (await this.vault.adapter.exists(normalizedPath, true)) {
+        await this.vault.adapter.remove(normalizedPath);
+      }
+    }
+  }
+
   async applyServerFiles(files: ServerFileChange[]): Promise<void> {
     for (const file of files) {
       const safePath = assertSafeVaultPath(file.path);
