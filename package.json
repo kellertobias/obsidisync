@@ -16,6 +16,7 @@
     "build:plugin": "tsc -p tsconfig.json --noEmit --skipLibCheck && node esbuild.config.mjs production",
     "build:server": "cargo build --manifest-path rust-server/Cargo.toml --release",
     "dev": "node esbuild.config.mjs",
+    "release": "semantic-release",
     "start:server": "cargo run --manifest-path rust-server/Cargo.toml",
     "test": "npm run test:plugin && npm run build:plugin && npm run test:server",
     "test:plugin": "node -e \"require('fs').rmSync('.tmp-tests',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/*.test.js",
@@ -30,10 +31,17 @@
   "author": "Tobias S. Keller",
   "license": "MIT",
   "devDependencies": {
+    "@saithodev/semantic-release-gitea": "^2.1.0",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/commit-analyzer": "^13.0.1",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/release-notes-generator": "^14.1.1",
     "@types/node": "^20.11.30",
     "builtin-modules": "^3.3.0",
     "esbuild": "^0.25.0",
     "obsidian": "latest",
+    "semantic-release": "^25.0.5",
     "typescript": "^5.4.5"
   }
 }

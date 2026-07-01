@@ -171,16 +171,11 @@ rust-server/target/release/obsidian-git-sync-server
 
 ## Release checklist
 
-Before tagging a plugin release:
+The Forgejo repository releases automatically: every push to `main` runs `semantic-release` (see `.releaserc.json`), which inspects the commits since the last release using [Conventional Commits](https://www.conventionalcommits.org/) to decide the next version, then bumps `package.json`, `package-lock.json`, `manifest.json`, updates `CHANGELOG.md`, tags the commit as `vX.Y.Z`, and publishes a Forgejo release with `main.js` and `manifest.json` as assets. No manual version bump or tag is needed for that repository.
 
-1. Run `npm run test:plugin`.
-2. Run `npm run build:plugin`.
-3. Bump `package.json`, `package-lock.json`, and `manifest.json` to the same version.
-4. Commit the source and generated `main.js`.
-5. Tag the commit as `vX.Y.Z`.
-6. Push `main` and the tag. The release workflow verifies the tag matches `manifest.json` and uploads `main.js` plus `manifest.json`.
+To trigger a release, just merge Conventional Commit messages (`feat:`, `fix:`, etc.) into `main`. A commit type that doesn't map to a version bump (`chore:`, `docs:`, `refactor:`, ...) will not produce a release.
 
-Before a v1.0.0 release, also run `npm test` so the Rust server tests and plugin tests both pass.
+The GitHub mirror release workflow (`.github/workflows/plugin-ci.yml`) is unaffected by this and still publishes a GitHub release whenever a `vX.Y.Z` tag is pushed there, so BRAT installs from GitHub keep working from tags pushed to that remote.
 
 ## Run the Rust server
 
