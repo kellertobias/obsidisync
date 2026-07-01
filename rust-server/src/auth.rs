@@ -143,6 +143,12 @@ impl AuthVerifier {
     }
 
     pub async fn verify_headers(&self, headers: &HeaderMap) -> Result<AuthContext> {
+        self.verify_headers_inner(headers)
+            .await
+            .map_err(|error| anyhow!("unauthorized: {error}"))
+    }
+
+    async fn verify_headers_inner(&self, headers: &HeaderMap) -> Result<AuthContext> {
         let header = headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
@@ -460,6 +466,33 @@ mod tests {
         };
         headers.insert("authorization", "Bearer ".parse().unwrap());
         assert!(empty_verifier.verify_headers(&headers).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn verify_headers_reports_every_failure_reason_as_unauthorized() {
+        // http::ApiError maps status codes by sniffing the error message for the word
+        // "unauthorized", so every verify_headers failure path — regardless of the
+        // underlying reason (bad token, missing header, wrong scheme) — must be wrapped
+        // in that word. Otherwise the client never sees a 401, never triggers its
+        // refresh-token retry, and a routine token expiry surfaces as a hard failure.
+        let verifier = AuthVerifier::StaticTokenForDev {
+            token: "secret".to_string(),
+            user: "alice".to_string(),
+        };
+
+        let mut wrong_token = HeaderMap::new();
+        wrong_token.insert("authorization", "Bearer wrong".parse().unwrap());
+        let error = verifier.verify_headers(&wrong_token).await.unwrap_err();
+        assert!(error.to_string().contains("unauthorized"));
+
+        let no_header = HeaderMap::new();
+        let error = verifier.verify_headers(&no_header).await.unwrap_err();
+        assert!(error.to_string().contains("unauthorized"));
+
+        let mut wrong_scheme = HeaderMap::new();
+        wrong_scheme.insert("authorization", "Basic secret".parse().unwrap());
+        let error = verifier.verify_headers(&wrong_scheme).await.unwrap_err();
+        assert!(error.to_string().contains("unauthorized"));
     }
 
     #[test]
