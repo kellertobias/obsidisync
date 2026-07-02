@@ -58,10 +58,6 @@ export default class ObsidiSyncPlugin extends Plugin {
         new FileHistoryView(leaf, this.gitService, {
           get: (path) => this.snapshotReference(path),
           save: (reference) => this.saveSnapshotReference(reference),
-          getVersionName: (sourcePath, hash) => this.versionMetadata(sourcePath, hash)?.name?.trim() || null,
-          saveVersionName: (sourcePath, hash, name) => this.saveVersionName(sourcePath, hash, name),
-          isVersionSquashed: (sourcePath, hash) => Boolean(this.versionMetadata(sourcePath, hash)?.squashedIntoHash),
-          squashVersion: (sourcePath, hash, intoHash) => this.squashVersion(sourcePath, hash, intoHash),
           lastSyncedAt: () => this.settings.lastSyncedAt,
           openConflictResolver: () => this.openConflictResolver()
         })
@@ -72,6 +68,7 @@ export default class ObsidiSyncPlugin extends Plugin {
     this.addRibbonIcon("history", "Open file history", () => this.openFileHistoryView());
     this.setupMobileSyncIndicator();
     this.setupSyncOnClose();
+    void this.migrateLocalHistoryVersions();
 
     this.addCommand({
       id: "sync-now",
@@ -565,39 +562,29 @@ export default class ObsidiSyncPlugin extends Plugin {
     await this.saveSettings();
   }
 
-  private versionMetadata(sourcePath: string, hash: string): { sourcePath: string; hash: string; name?: string; squashedIntoHash?: string } | null {
-    return this.settings.historyVersions.find((version) => version.sourcePath === sourcePath && version.hash === hash) ?? null;
-  }
-
-  private async saveVersionName(sourcePath: string, hash: string, name: string | null): Promise<void> {
-    const current = this.versionMetadata(sourcePath, hash);
-    await this.saveVersionMetadata({
-      sourcePath,
-      hash,
-      name: name ?? undefined,
-      squashedIntoHash: current?.squashedIntoHash
-    });
-  }
-
-  private async squashVersion(sourcePath: string, hash: string, intoHash: string): Promise<void> {
-    const current = this.versionMetadata(sourcePath, hash);
-    await this.saveVersionMetadata({
-      sourcePath,
-      hash,
-      name: current?.name,
-      squashedIntoHash: intoHash
-    });
-  }
-
-  private async saveVersionMetadata(entry: { sourcePath: string; hash: string; name?: string; squashedIntoHash?: string }): Promise<void> {
-    const withoutExisting = this.settings.historyVersions.filter(
-      (version) => version.sourcePath !== entry.sourcePath || version.hash !== entry.hash
-    );
-    if (!entry.name && !entry.squashedIntoHash) {
-      this.settings.historyVersions = withoutExisting;
-    } else {
-      this.settings.historyVersions = [...withoutExisting, entry].slice(-500);
+  // One-time migration: version names/squashes used to live only in local plugin settings
+  // (never synced between devices). Push them to the server-side registry, then drop them
+  // locally. Best-effort: unreachable server or a since-squashed/gone hash just gets skipped.
+  private async migrateLocalHistoryVersions(): Promise<void> {
+    const pending = this.settings.historyVersions;
+    if (pending.length === 0) return;
+    if (!this.settings.serverUrl || !this.settings.oidcAccessToken || !this.settings.userSlug || !this.settings.vaultSlug) {
+      // Not logged in yet - retry on a later load rather than discarding the local data now.
+      return;
     }
+    for (const entry of pending) {
+      try {
+        await this.gitService.saveVersionMetadata({
+          path: entry.sourcePath,
+          hash: entry.hash,
+          name: entry.name ?? null,
+          squashedIntoHash: entry.squashedIntoHash ?? null
+        });
+      } catch {
+        // Server not configured yet, unreachable, or the hash no longer exists - skip it.
+      }
+    }
+    this.settings.historyVersions = [];
     await this.saveSettings();
   }
 

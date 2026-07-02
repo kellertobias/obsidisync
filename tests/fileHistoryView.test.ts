@@ -101,18 +101,18 @@ test("file history view opens selected versions with the regular Obsidian file U
 test("file history list shows version numbers and aligns source device right", () => {
   const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
 
-  assert.match(viewSource, /const versionNumber = visibleHistory\.length - index/);
+  assert.match(viewSource, /const versionNumber = entry\.versionNumber/);
   assert.match(viewSource, /`Version \$\{versionNumber\}: \$\{name\}`/);
   assert.match(viewSource, /versionEl\.style\.color = this\.selectedHash === entry\.hash \? "var\(--text-accent\)" : "var\(--text-normal\)"/);
-  assert.match(viewSource, /getVersionName\(sourcePath: string, hash: string\): string \| null/);
-  assert.match(viewSource, /saveVersionName\(sourcePath: string, hash: string, name: string \| null\): Promise<void>/);
-  assert.match(viewSource, /isVersionSquashed\(sourcePath: string, hash: string\): boolean/);
-  assert.match(viewSource, /squashVersion\(sourcePath: string, hash: string, intoHash: string\): Promise<void>/);
+  assert.match(viewSource, /private versionName\(entry: HistoryEntry\): string \| null/);
+  assert.match(viewSource, /await this\.gitService\.saveVersionMetadata\(\{ path: sourcePath, hash, name: trimmed \|\| null, clearName: !trimmed \}\)/);
+  assert.match(viewSource, /entry\.squashedIntoHash == null/);
+  assert.match(viewSource, /private async squashVersion\(entry: HistoryEntry, intoEntry: HistoryEntry\): Promise<void>/);
   assert.match(viewSource, /class VersionNameModal extends Modal/);
   assert.match(viewSource, /contentEl\.createEl\("h2", \{ text: "Name version" \}\)/);
   assert.match(viewSource, /setButtonText\("Save"\)/);
-  assert.match(viewSource, /const intoVersionNumber = visibleHistory\.length - index \+ 1/);
-  assert.match(viewSource, /window\.confirm\(`Squash Version \$\{versionNumber\} into a newer version\?/);
+  assert.match(viewSource, /const intoEntry = visibleHistory\[index - 1\]/);
+  assert.match(viewSource, /window\.confirm\(`Squash Version \$\{entry\.versionNumber\} into Version \$\{intoEntry\.versionNumber\}\?/);
   assert.match(viewSource, /button\.style\.display = "flex"/);
   assert.match(viewSource, /button\.style\.alignItems = "center"/);
   assert.match(viewSource, /button\.style\.justifyContent = "stretch"/);

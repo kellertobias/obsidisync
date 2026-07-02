@@ -143,6 +143,15 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
         .route("/v1/users/:user/vaults/:vault/history", get(history))
         .route("/v1/users/:user/vaults/:vault/file", get(file_at_version))
         .route("/v1/users/:user/vaults/:vault/resolve", post(resolve))
+        .route("/v1/users/:user/vaults/:vault/devices", get(devices))
+        .route(
+            "/v1/users/:user/vaults/:vault/files/device-versions",
+            get(device_versions),
+        )
+        .route(
+            "/v1/users/:user/vaults/:vault/files/version-metadata",
+            post(set_version_metadata),
+        )
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(Arc::new(state));
 
@@ -715,6 +724,49 @@ async fn resolve(
 ) -> Result<Json<SyncResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
     Ok(Json(state.vaults.resolve(&user, &vault, request).await?))
+}
+
+async fn devices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+) -> Result<Json<Vec<DeviceEntry>>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(state.vaults.list_devices(&user, &vault).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceVersionsQuery {
+    path: String,
+}
+
+async fn device_versions(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Query(query): Query<DeviceVersionsQuery>,
+) -> Result<Json<Vec<DeviceVersionEntry>>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(
+        state
+            .vaults
+            .device_versions(&user, &vault, &query.path)
+            .await?,
+    ))
+}
+
+async fn set_version_metadata(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Json(request): Json<VersionMetadataRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    state
+        .vaults
+        .set_version_metadata(&user, &vault, request)
+        .await?;
+    Ok(Json(serde_json::json!({})))
 }
 
 #[derive(Debug, Deserialize)]

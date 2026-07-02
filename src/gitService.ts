@@ -3,6 +3,7 @@ import { arrayBufferToBase64 } from "./base64";
 import { diffManifests } from "./manifest";
 import {
   ClientChange,
+  DeviceVersionEntry,
   HistoryEntry,
   RegisterRequest,
   RegisterResponse,
@@ -17,7 +18,8 @@ import {
   UploadCompleteResponse,
   UploadInitRequest,
   UploadInitResponse,
-  VersionFileResponse
+  VersionFileResponse,
+  VersionMetadataRequest
 } from "./protocol";
 import { getDeviceName } from "./runtime";
 import { IosGitSyncSettings } from "./settings";
@@ -405,6 +407,21 @@ export class GitService {
     this.requireConfigured();
     const suffix = path ? `?path=${encodeURIComponent(path)}` : "";
     return this.getJson<HistoryEntry[]>(`${this.vaultPath()}/history${suffix}`);
+  }
+
+  async deviceVersions(path: string): Promise<DeviceVersionEntry[]> {
+    this.requireConfigured();
+    try {
+      return await this.getJson<DeviceVersionEntry[]>(`${this.vaultPath()}/files/device-versions?path=${encodeURIComponent(path)}`);
+    } catch {
+      // Older servers don't have this endpoint yet; degrade to no badges.
+      return [];
+    }
+  }
+
+  async saveVersionMetadata(request: VersionMetadataRequest): Promise<void> {
+    this.requireConfigured();
+    await this.postJson<void>(`${this.vaultPath()}/files/version-metadata`, request);
   }
 
   async fileAtVersion(path: string, hash: string): Promise<VersionFileResponse> {

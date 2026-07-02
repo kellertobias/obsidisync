@@ -9,6 +9,10 @@ use crate::paths::{
 };
 use crate::protocol::*;
 use crate::remote::RemotePolicy;
+use crate::version_registry::{
+    read_devices, read_version_metadata, version_metadata_key, write_devices,
+    write_version_metadata, DEVICES_FILE_NAME, VERSION_METADATA_FILE_NAME,
+};
 use anyhow::{anyhow, bail, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -346,21 +350,52 @@ impl VaultService {
                 }
             }
 
+            let files = self
+                .changed_files_since(
+                    &repo,
+                    &binary_root,
+                    base_head.as_deref(),
+                    &request.client_manifest,
+                )
+                .await?;
+
+            let server_head = self.head_from_repo(&repo).await?;
+            if let Some(head) = &server_head {
+                self.upsert_device(&user, &vault, &request.client_id, &request.device_name, head)
+                    .await?;
+            }
+
             Ok(SyncResponse {
                 status: SyncStatus::Ok,
-                server_head: self.head_from_repo(&repo).await?,
-                files: self
-                    .changed_files_since(
-                        &repo,
-                        &binary_root,
-                        base_head.as_deref(),
-                        &request.client_manifest,
-                    )
-                    .await?,
+                server_head,
+                files,
                 conflicts: vec![],
             })
         })
         .await
+    }
+
+    async fn upsert_device(
+        &self,
+        user: &str,
+        vault: &str,
+        client_id: &str,
+        device_name: &str,
+        head: &str,
+    ) -> Result<()> {
+        let path = self.devices_path(user, vault);
+        let mut registry = read_devices(&path).await?;
+        registry.devices.insert(
+            client_id.to_string(),
+            DeviceEntry {
+                client_id: client_id.to_string(),
+                device_name: sanitize_commit_component(device_name),
+                last_synced_head: head.to_string(),
+                last_synced_at: isoish_now(),
+            },
+        );
+        write_devices(&path, &registry).await?;
+        Ok(())
     }
 
     pub async fn history(
@@ -372,25 +407,166 @@ impl VaultService {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         let repo = self.repo_dir(&user, &vault);
-        if let Some(path) = file_path {
+        let mut entries = if let Some(path) = file_path {
             let safe_path = validate_vault_path(path)?;
             if !is_text_or_code_path(&safe_path) {
-                return self.binary_history(&repo, &safe_path).await;
+                self.binary_history(&repo, &safe_path).await?
+            } else {
+                let args = vec![
+                    "log".to_string(),
+                    "--format=%H%x09%aI%x09%an%x09%s".to_string(),
+                    "--".to_string(),
+                    safe_path,
+                ];
+                let output = String::from_utf8_lossy(&git_strings(&repo, &args, &[0]).await?.stdout)
+                    .trim()
+                    .to_string();
+                parse_history_output(&output)
+            }
+        } else {
+            let args = vec![
+                "log".to_string(),
+                "--format=%H%x09%aI%x09%an%x09%s".to_string(),
+            ];
+            let output = String::from_utf8_lossy(&git_strings(&repo, &args, &[0]).await?.stdout)
+                .trim()
+                .to_string();
+            parse_history_output(&output)
+        };
+
+        self.enrich_history(&user, &vault, file_path, &mut entries)
+            .await?;
+        Ok(entries)
+    }
+
+    async fn enrich_history(
+        &self,
+        user: &str,
+        vault: &str,
+        file_path: Option<&str>,
+        entries: &mut [HistoryEntry],
+    ) -> Result<()> {
+        let metadata = read_version_metadata(&self.version_metadata_path(user, vault))
+            .await
+            .unwrap_or_default();
+        let total = entries.len() as u32;
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.version_number = total - index as u32;
+            entry.device_name = extract_sync_device(&entry.subject);
+            if let Some(path) = file_path {
+                let key = version_metadata_key(path, &entry.hash);
+                if let Some(found) = metadata.entries.get(&key) {
+                    entry.name = found.name.clone();
+                    entry.squashed_into_hash = found.squashed_into_hash.clone();
+                }
             }
         }
-        let mut args = vec![
-            "log".to_string(),
-            "--format=%H%x09%aI%x09%an%x09%s".to_string(),
-        ];
-        if let Some(path) = file_path {
-            let safe_path = validate_vault_path(path)?;
-            args.push("--".to_string());
-            args.push(safe_path);
+        Ok(())
+    }
+
+    pub async fn list_devices(&self, user: &str, vault: &str) -> Result<Vec<DeviceEntry>> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let registry = read_devices(&self.devices_path(&user, &vault)).await?;
+        Ok(registry.devices.into_values().collect())
+    }
+
+    pub async fn device_versions(
+        &self,
+        user: &str,
+        vault: &str,
+        file_path: &str,
+    ) -> Result<Vec<DeviceVersionEntry>> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let safe_path = validate_vault_path(file_path)?;
+        let repo = self.repo_dir(&user, &vault);
+        let registry = read_devices(&self.devices_path(&user, &vault)).await?;
+        let history = self.history(&user, &vault, Some(&safe_path)).await?;
+
+        let mut out = Vec::new();
+        for device in registry.devices.values() {
+            let hash = self
+                .latest_commit_for_path_at(&repo, &device.last_synced_head, &safe_path)
+                .await?;
+            let version_number = hash
+                .as_deref()
+                .and_then(|hash| history.iter().find(|entry| entry.hash == hash))
+                .map(|entry| entry.version_number);
+            out.push(DeviceVersionEntry {
+                client_id: device.client_id.clone(),
+                device_name: device.device_name.clone(),
+                hash,
+                version_number,
+            });
         }
-        let output = String::from_utf8_lossy(&git_strings(&repo, &args, &[0]).await?.stdout)
-            .trim()
-            .to_string();
-        Ok(parse_history_output(&output))
+        Ok(out)
+    }
+
+    async fn latest_commit_for_path_at(
+        &self,
+        repo: &Path,
+        head: &str,
+        path: &str,
+    ) -> Result<Option<String>> {
+        if validate_commit_id(head).is_err() || !self.valid_commit(repo, head).await? {
+            return Ok(None);
+        }
+        let output = git(
+            Some(repo),
+            &["log", "-1", "--format=%H", head, "--", path],
+            &[0, 128],
+        )
+        .await?;
+        if output.code != 0 {
+            return Ok(None);
+        }
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(if hash.is_empty() { None } else { Some(hash) })
+    }
+
+    pub async fn set_version_metadata(
+        &self,
+        user: &str,
+        vault: &str,
+        request: VersionMetadataRequest,
+    ) -> Result<()> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        self.with_lock(&user, &vault, || async {
+            let repo = self.repo_dir(&user, &vault);
+            let safe_path = validate_vault_path(&request.path)?;
+            let hash = validate_commit_id(&request.hash)?;
+            if !self.valid_commit(&repo, &hash).await? {
+                bail!("unknown version hash");
+            }
+            let squashed_into_hash = match &request.squashed_into_hash {
+                Some(target) => {
+                    let target = validate_commit_id(target)?;
+                    if !self.valid_commit(&repo, &target).await? {
+                        bail!("unknown squash target hash");
+                    }
+                    Some(target)
+                }
+                None => None,
+            };
+
+            let metadata_path = self.version_metadata_path(&user, &vault);
+            let mut store = read_version_metadata(&metadata_path).await?;
+            let key = version_metadata_key(&safe_path, &hash);
+            let entry = store.entries.entry(key).or_default();
+            if request.clear_name.unwrap_or(false) {
+                entry.name = None;
+            } else if let Some(name) = &request.name {
+                entry.name = Some(name.clone());
+            }
+            if squashed_into_hash.is_some() {
+                entry.squashed_into_hash = squashed_into_hash;
+            }
+            write_version_metadata(&metadata_path, &store).await?;
+            Ok(())
+        })
+        .await
     }
 
     pub async fn activity_feed(&self, user: &str, limit: usize) -> Result<Vec<ActivityFeedEntry>> {
@@ -892,7 +1068,7 @@ impl VaultService {
         };
 
         for path in text_paths {
-            if path == BINARY_MANIFEST_PATH {
+            if !is_client_visible_conflict_path(&path) {
                 continue;
             }
             let path = validate_vault_path(&path)?;
@@ -1212,6 +1388,14 @@ impl VaultService {
 
     fn pending_conflicts_path(&self, user: &str, vault: &str) -> PathBuf {
         self.vault_dir(user, vault).join(PENDING_CONFLICTS_PATH)
+    }
+
+    fn devices_path(&self, user: &str, vault: &str) -> PathBuf {
+        self.vault_dir(user, vault).join(DEVICES_FILE_NAME)
+    }
+
+    fn version_metadata_path(&self, user: &str, vault: &str) -> PathBuf {
+        self.vault_dir(user, vault).join(VERSION_METADATA_FILE_NAME)
     }
 
     async fn read_pending_conflicts(&self, user: &str, vault: &str) -> Result<BTreeSet<String>> {
@@ -1681,9 +1865,41 @@ fn parse_history_output(output: &str) -> Vec<HistoryEntry> {
                 date: parts.next().unwrap_or_default().to_string(),
                 author: parts.next().unwrap_or_default().to_string(),
                 subject: parts.collect::<Vec<_>>().join("\t"),
+                version_number: 0,
+                name: None,
+                squashed_into_hash: None,
+                device_name: None,
             }
         })
         .collect()
+}
+
+/// Mirrors the client-side `extractSyncDevice` heuristic (previously TS-only in
+/// `fileHistoryView.ts`), parsing the device name out of a `"sync: {device} {time}"`
+/// commit subject so the server can return it as a real field.
+fn extract_sync_device(subject: &str) -> Option<String> {
+    let trimmed = subject.trim();
+    if trimmed == "sync: server pending" {
+        return Some("Server".to_string());
+    }
+
+    let rest = if let Some(rest) = trimmed.strip_prefix("sync: resolve ") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("sync: ") {
+        rest
+    } else {
+        return None;
+    };
+
+    let device = match rest.find(" SystemTime ") {
+        Some(index) => rest[..index].trim(),
+        None => rest.trim(),
+    };
+    if device.is_empty() {
+        None
+    } else {
+        Some(device.to_string())
+    }
 }
 
 fn validate_optional_commit_id(input: Option<&str>) -> Result<Option<String>> {

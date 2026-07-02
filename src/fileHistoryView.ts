@@ -2,7 +2,7 @@ import { App, ItemView, MarkdownView, Modal, Notice, setIcon, Setting, TFile, Wo
 import { base64ToArrayBuffer } from "./base64";
 import { GitService, LoginStatus } from "./gitService";
 import { HISTORY_SNAPSHOT_DIR } from "./ignore";
-import { HistoryEntry } from "./protocol";
+import { DeviceVersionEntry, HistoryEntry } from "./protocol";
 import { sha256Hex } from "./vaultState";
 
 export const FILE_HISTORY_VIEW_TYPE = "obsidisync-file-history";
@@ -33,10 +33,6 @@ export interface HistorySnapshotReference {
 export interface HistorySnapshotStore {
   get(path: string): HistorySnapshotReference | null;
   save(reference: HistorySnapshotReference): Promise<void>;
-  getVersionName(sourcePath: string, hash: string): string | null;
-  saveVersionName(sourcePath: string, hash: string, name: string | null): Promise<void>;
-  isVersionSquashed(sourcePath: string, hash: string): boolean;
-  squashVersion(sourcePath: string, hash: string, intoHash: string): Promise<void>;
   lastSyncedAt(): string | null;
   openConflictResolver(): void;
 }
@@ -44,6 +40,7 @@ export interface HistorySnapshotStore {
 export class FileHistoryView extends ItemView {
   private filePath: string | null = null;
   private history: HistoryEntry[] = [];
+  private deviceVersions: DeviceVersionEntry[] = [];
   private fileStatus: FileSyncStatus | null = null;
   private selectedHash: string | null = null;
   private requestId = 0;
@@ -161,7 +158,12 @@ export class FileHistoryView extends ItemView {
 
     listEl.createEl("p", { text: "Loading history..." });
     try {
-      this.history = await this.gitService.history(this.filePath);
+      const [history, deviceVersions] = await Promise.all([
+        this.gitService.history(this.filePath),
+        this.gitService.deviceVersions(this.filePath)
+      ]);
+      this.history = history;
+      this.deviceVersions = deviceVersions;
       if (currentRequest !== this.requestId) return;
       this.fileStatus = await this.computeFileStatus();
       if (currentRequest !== this.requestId) return;
@@ -310,11 +312,12 @@ export class FileHistoryView extends ItemView {
     list.style.minHeight = "0";
     list.style.overflow = "auto";
 
-    const visibleHistory = this.history.filter((entry) => !this.isVersionSquashed(entry)).slice(0, 80);
+    const visibleHistory = this.history.filter((entry) => entry.squashedIntoHash == null).slice(0, 80);
 
     for (const [index, entry] of visibleHistory.entries()) {
-      const versionNumber = visibleHistory.length - index;
+      const versionNumber = entry.versionNumber;
       const source = this.describeSource(entry);
+      const pinnedDevices = this.devicesPinnedAt(entry.hash);
       const item = list.createDiv();
       item.style.display = "grid";
       item.style.gridTemplateColumns = "minmax(0, 1fr) auto";
@@ -362,6 +365,17 @@ export class FileHistoryView extends ItemView {
       dateEl.style.overflow = "hidden";
       dateEl.style.textOverflow = "ellipsis";
       dateEl.style.whiteSpace = "nowrap";
+      if (pinnedDevices.length > 0) {
+        const pinEl = titleWrap.createEl("div", { text: `📍 ${pinnedDevices.join(", ")}` });
+        pinEl.style.display = "flex";
+        pinEl.style.alignItems = "center";
+        pinEl.style.fontSize = "12px";
+        pinEl.style.color = "var(--text-accent)";
+        pinEl.style.overflow = "hidden";
+        pinEl.style.textOverflow = "ellipsis";
+        pinEl.style.whiteSpace = "nowrap";
+        pinEl.title = `Currently on this version: ${pinnedDevices.join(", ")}`;
+      }
       const deviceEl = row.createEl("div", { text: source.device });
       deviceEl.style.display = "flex";
       deviceEl.style.alignItems = "center";
@@ -386,9 +400,9 @@ export class FileHistoryView extends ItemView {
       nameButton.onclick = () => this.nameVersion(entry);
 
       if (index > 0) {
-        const intoVersionNumber = visibleHistory.length - index + 1;
-        const squashButton = this.createIconButton(actions, "combine", `Squash Version ${versionNumber} into Version ${intoVersionNumber}`);
-        squashButton.onclick = () => this.squashVersion(entry, visibleHistory[index - 1], versionNumber);
+        const intoEntry = visibleHistory[index - 1];
+        const squashButton = this.createIconButton(actions, "combine", `Squash Version ${versionNumber} into Version ${intoEntry.versionNumber}`);
+        squashButton.onclick = () => this.squashVersion(entry, intoEntry);
       }
     }
   }
@@ -406,13 +420,14 @@ export class FileHistoryView extends ItemView {
   }
 
   private versionName(entry: HistoryEntry): string | null {
-    if (!this.filePath) return null;
-    return this.snapshots.getVersionName(this.filePath, entry.hash);
+    return entry.name?.trim() || null;
   }
 
-  private isVersionSquashed(entry: HistoryEntry): boolean {
-    if (!this.filePath) return false;
-    return this.snapshots.isVersionSquashed(this.filePath, entry.hash);
+  private devicesPinnedAt(hash: string): string[] {
+    const currentDevice = this.gitService.currentDeviceName();
+    return this.deviceVersions
+      .filter((device) => device.hash === hash)
+      .map((device) => (sameDevice(device.deviceName, currentDevice) ? "This device" : device.deviceName));
   }
 
   private nameVersion(entry: HistoryEntry): void {
@@ -422,16 +437,16 @@ export class FileHistoryView extends ItemView {
     const current = this.versionName(entry) ?? "";
     new VersionNameModal(this.app, current, async (name) => {
       const trimmed = name.trim();
-      await this.snapshots.saveVersionName(sourcePath, hash, trimmed || null);
+      await this.gitService.saveVersionMetadata({ path: sourcePath, hash, name: trimmed || null, clearName: !trimmed });
       await this.refresh();
     }).open();
   }
 
-  private async squashVersion(entry: HistoryEntry, intoEntry: HistoryEntry, versionNumber: number): Promise<void> {
+  private async squashVersion(entry: HistoryEntry, intoEntry: HistoryEntry): Promise<void> {
     if (!this.filePath) return;
-    const ok = window.confirm(`Squash Version ${versionNumber} into a newer version? This only collapses the local history list.`);
+    const ok = window.confirm(`Squash Version ${entry.versionNumber} into Version ${intoEntry.versionNumber}? This only collapses the history list; nothing is deleted.`);
     if (!ok) return;
-    await this.snapshots.squashVersion(this.filePath, entry.hash, intoEntry.hash);
+    await this.gitService.saveVersionMetadata({ path: this.filePath, hash: entry.hash, squashedIntoHash: intoEntry.hash });
     if (this.selectedHash === entry.hash) this.selectedHash = intoEntry.hash;
     await this.refresh();
   }

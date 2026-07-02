@@ -7,3 +7,4 @@ pub mod paths;
 pub mod protocol;
 pub mod remote;
 pub mod vault;
+pub mod version_registry;

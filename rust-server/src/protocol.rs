@@ -148,6 +148,45 @@ pub struct HistoryEntry {
     pub date: String,
     pub author: String,
     pub subject: String,
+    #[serde(default)]
+    pub version_number: u32,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub squashed_into_hash: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceEntry {
+    pub client_id: String,
+    pub device_name: String,
+    pub last_synced_head: String,
+    pub last_synced_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceVersionEntry {
+    pub client_id: String,
+    pub device_name: String,
+    pub hash: Option<String>,
+    pub version_number: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionMetadataRequest {
+    pub path: String,
+    pub hash: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub clear_name: Option<bool>,
+    #[serde(default)]
+    pub squashed_into_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

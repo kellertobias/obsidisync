@@ -109,7 +109,32 @@ export interface HistoryEntry {
   date: string;
   author: string;
   subject: string;
+  versionNumber: number;
+  name?: string | null;
+  squashedIntoHash?: string | null;
   deviceName?: string | null;
+}
+
+export interface DeviceEntry {
+  clientId: string;
+  deviceName: string;
+  lastSyncedHead: string;
+  lastSyncedAt: string;
+}
+
+export interface DeviceVersionEntry {
+  clientId: string;
+  deviceName: string;
+  hash: string | null;
+  versionNumber: number | null;
+}
+
+export interface VersionMetadataRequest {
+  path: string;
+  hash: string;
+  name?: string | null;
+  clearName?: boolean;
+  squashedIntoHash?: string | null;
 }
 
 export interface VersionFileResponse {
