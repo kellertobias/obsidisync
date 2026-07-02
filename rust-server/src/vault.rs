@@ -361,8 +361,14 @@ impl VaultService {
 
             let server_head = self.head_from_repo(&repo).await?;
             if let Some(head) = &server_head {
-                self.upsert_device(&user, &vault, &request.client_id, &request.device_name, head)
-                    .await?;
+                self.upsert_device(
+                    &user,
+                    &vault,
+                    &request.client_id,
+                    &request.device_name,
+                    head,
+                )
+                .await?;
             }
 
             Ok(SyncResponse {
@@ -418,9 +424,10 @@ impl VaultService {
                     "--".to_string(),
                     safe_path,
                 ];
-                let output = String::from_utf8_lossy(&git_strings(&repo, &args, &[0]).await?.stdout)
-                    .trim()
-                    .to_string();
+                let output =
+                    String::from_utf8_lossy(&git_strings(&repo, &args, &[0]).await?.stdout)
+                        .trim()
+                        .to_string();
                 parse_history_output(&output)
             }
         } else {

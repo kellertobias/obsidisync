@@ -58,7 +58,9 @@ pub async fn write_devices(path: &Path, registry: &DeviceRegistry) -> Result<()>
 pub async fn read_version_metadata(path: &Path) -> Result<VersionMetadataStore> {
     match fs::read(path).await {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(VersionMetadataStore::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(VersionMetadataStore::default())
+        }
         Err(error) => Err(error.into()),
     }
 }
