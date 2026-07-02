@@ -1892,10 +1892,8 @@ fn extract_sync_device(subject: &str) -> Option<String> {
 
     let rest = if let Some(rest) = trimmed.strip_prefix("sync: resolve ") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("sync: ") {
-        rest
     } else {
-        return None;
+        trimmed.strip_prefix("sync: ")?
     };
 
     let device = match rest.find(" SystemTime ") {
