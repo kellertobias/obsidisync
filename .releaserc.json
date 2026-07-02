@@ -5,22 +5,9 @@
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
     [
-      "@semantic-release/changelog",
-      {
-        "changelogFile": "CHANGELOG.md"
-      }
-    ],
-    [
       "@semantic-release/exec",
       {
         "prepareCmd": "npm version ${nextRelease.version} --no-git-tag-version --allow-same-version && node scripts/sync-version.mjs ${nextRelease.version}"
-      }
-    ],
-    [
-      "@semantic-release/git",
-      {
-        "assets": ["package.json", "package-lock.json", "manifest.json", "CHANGELOG.md", "main.js"],
-        "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }
     ],
     [

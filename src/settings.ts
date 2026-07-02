@@ -11,6 +11,8 @@ export interface IosGitSyncSettings {
   oidcAccessToken: string;
   oidcRefreshToken: string;
   oidcAccessTokenExpiresAt: string | null;
+  lastLoginError: string | null;
+  lastLoginAttemptAt: string | null;
   userSlug: string;
   vaultSlug: string;
   remoteUrl: string;
@@ -59,6 +61,8 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   oidcAccessToken: "",
   oidcRefreshToken: "",
   oidcAccessTokenExpiresAt: null,
+  lastLoginError: null,
+  lastLoginAttemptAt: null,
   userSlug: "",
   vaultSlug: "",
   remoteUrl: "",

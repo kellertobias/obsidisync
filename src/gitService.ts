@@ -27,6 +27,7 @@ import { sha256Hex, VaultState } from "./vaultState";
 type SaveSettings = () => Promise<void>;
 type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
 type SyncStateListener = (running: boolean) => void;
+type LoginStatusListener = (status: LoginStatus) => void;
 type SyncBlocker = () => string | null;
 const MAIN_BRANCH = "main";
 const CLIENT_API_VERSION = 1;
@@ -68,10 +69,17 @@ interface AuthSessionResponse {
   subject: string;
 }
 
+export interface LoginStatus {
+  state: "logged-in" | "not-logged-in" | "failed";
+  title: string;
+  detail: string;
+}
+
 export class GitService {
   private running = false;
   private syncQueued = false;
   private syncStateListeners = new Set<SyncStateListener>();
+  private loginStatusListeners = new Set<LoginStatusListener>();
   private oidcDiscoveryCache: OidcDiscovery | null = null;
   private oidcLoginConfig: Extract<ServerAuthConfig, { type: "oidc" }> | null = null;
   private oidcLoginServerUrl: string | null = null;
@@ -119,6 +127,45 @@ export class GitService {
     };
   }
 
+  onLoginStatusChange(listener: LoginStatusListener): () => void {
+    this.loginStatusListeners.add(listener);
+    listener(this.loginStatus());
+    return () => {
+      this.loginStatusListeners.delete(listener);
+    };
+  }
+
+  loginStatus(): LoginStatus {
+    if (this.settings.lastLoginError) {
+      return {
+        state: "failed",
+        title: "Login failed",
+        detail: this.settings.lastLoginError
+      };
+    }
+
+    if (!this.settings.oidcAccessToken) {
+      return {
+        state: "not-logged-in",
+        title: "Not logged in",
+        detail: "Log in to ObsidiSync before syncing or loading server history."
+      };
+    }
+
+    return {
+      state: "logged-in",
+      title: "Logged in",
+      detail: this.settings.userSlug ? `Signed in as ${this.settings.userSlug}.` : "Access token is configured."
+    };
+  }
+
+  async recordLoginFailure(message: string): Promise<void> {
+    this.settings.lastLoginError = message;
+    this.settings.lastLoginAttemptAt = new Date().toISOString();
+    await this.saveSettings();
+    this.emitLoginStatus();
+  }
+
   async authConfig(): Promise<ServerAuthConfig> {
     if (!this.settings.serverUrl) throw new Error("Set a sync server URL before logging in");
     assertSecureHttpUrl(this.settings.serverUrl, "Sync server URL");
@@ -156,8 +203,11 @@ export class GitService {
     this.settings.oidcAccessToken = body.accessToken;
     this.settings.oidcRefreshToken = "";
     this.settings.oidcAccessTokenExpiresAt = null;
+    this.settings.lastLoginError = null;
+    this.settings.lastLoginAttemptAt = new Date().toISOString();
     this.settings.userSlug = body.user;
     await this.saveSettings();
+    this.emitLoginStatus();
   }
 
   async loadAuthenticatedUser(): Promise<void> {
@@ -165,7 +215,9 @@ export class GitService {
     await this.checkServerCompatibility();
     const session = await this.getJson<AuthSessionResponse>("/v1/auth/session");
     this.settings.userSlug = session.user;
+    this.settings.lastLoginError = null;
     await this.saveSettings();
+    this.emitLoginStatus();
   }
 
   async sync(): Promise<SyncConflict[]> {
@@ -444,6 +496,10 @@ export class GitService {
       if (response.status >= 200 && response.status < 300 && body.access_token) {
         await this.storeOidcTokenResponse(body);
         await this.loadAuthenticatedUser();
+        this.settings.lastLoginError = null;
+        this.settings.lastLoginAttemptAt = new Date().toISOString();
+        await this.saveSettings();
+        this.emitLoginStatus();
         new Notice("OIDC login complete");
         return;
       }
@@ -506,6 +562,8 @@ export class GitService {
   private async storeOidcTokenResponse(body: OidcTokenResponse): Promise<void> {
     if (!body.access_token) throw new Error("OIDC token response did not include an access token");
     this.settings.oidcAccessToken = body.access_token;
+    this.settings.lastLoginError = null;
+    this.settings.lastLoginAttemptAt = new Date().toISOString();
     if (body.refresh_token) {
       this.settings.oidcRefreshToken = body.refresh_token;
     }
@@ -546,11 +604,16 @@ export class GitService {
     if (body.error === "invalid_grant") {
       this.settings.oidcRefreshToken = "";
       this.settings.oidcAccessTokenExpiresAt = null;
+      this.settings.lastLoginError = "Re-login failed: refresh token was rejected. Log in to ObsidiSync again.";
+      this.settings.lastLoginAttemptAt = new Date().toISOString();
       await this.saveSettings();
+      this.emitLoginStatus();
       return false;
     }
 
-    throw new Error(body.error_description || body.error || response.text || `OIDC token refresh failed: HTTP ${response.status}`);
+    const message = body.error_description || body.error || response.text || `OIDC token refresh failed: HTTP ${response.status}`;
+    await this.recordLoginFailure(`Re-login failed: ${message}`);
+    throw new Error(message);
   }
 
   private async refreshExpiringOidcAccessToken(): Promise<void> {
@@ -560,6 +623,9 @@ export class GitService {
     if (Number.isNaN(expiresAt) || expiresAt > Date.now() + 60_000) return;
 
     if (!(await this.refreshOidcAccessToken())) {
+      if (!this.settings.lastLoginError) {
+        await this.recordLoginFailure("Login expired or unauthorized. Log in to ObsidiSync again.");
+      }
       throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
     }
   }
@@ -620,6 +686,9 @@ export class GitService {
           return response.json as T;
         }
       }
+      if (!this.settings.lastLoginError) {
+        await this.recordLoginFailure("Login expired or unauthorized. Log in to ObsidiSync again.");
+      }
       throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
     }
 
@@ -656,6 +725,9 @@ export class GitService {
         if (response.status >= 200 && response.status < 300) {
           return response.json as T;
         }
+      }
+      if (!this.settings.lastLoginError) {
+        await this.recordLoginFailure("Login expired or unauthorized. Log in to ObsidiSync again.");
       }
       throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
     }
@@ -781,6 +853,13 @@ export class GitService {
   private emitSyncState(): void {
     for (const listener of this.syncStateListeners) {
       listener(this.running);
+    }
+  }
+
+  private emitLoginStatus(): void {
+    const status = this.loginStatus();
+    for (const listener of this.loginStatusListeners) {
+      listener(status);
     }
   }
 }

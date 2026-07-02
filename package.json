@@ -32,10 +32,8 @@
   "license": "MIT",
   "devDependencies": {
     "@saithodev/semantic-release-gitea": "^2.1.0",
-    "@semantic-release/changelog": "^6.0.3",
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/exec": "^7.1.0",
-    "@semantic-release/git": "^10.0.1",
     "@semantic-release/release-notes-generator": "^14.1.1",
     "@types/node": "^20.11.30",
     "builtin-modules": "^3.3.0",

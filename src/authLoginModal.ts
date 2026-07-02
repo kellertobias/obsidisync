@@ -29,7 +29,9 @@ export class AuthLoginModal extends Modal {
         this.renderManualToken();
       }
     } catch (error) {
-      this.statusEl.setText(`Login failed: ${errorMessage(error)}`);
+      const message = errorMessage(error);
+      await this.gitService.recordLoginFailure(message);
+      this.statusEl.setText(`Login failed: ${message}`);
     }
   }
 
@@ -92,7 +94,9 @@ export class AuthLoginModal extends Modal {
             await this.complete("Login complete");
           } catch (error) {
             button.setDisabled(false);
-            this.setStatus(`Login failed: ${errorMessage(error)}`);
+            const message = errorMessage(error);
+            await this.gitService.recordLoginFailure(message);
+            this.setStatus(`Login failed: ${message}`);
           }
         })
     );

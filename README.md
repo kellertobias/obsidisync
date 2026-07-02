@@ -171,7 +171,7 @@ rust-server/target/release/obsidian-git-sync-server
 
 ## Release checklist
 
-The Forgejo repository releases automatically: every push to `main` runs `semantic-release` (see `.releaserc.json`), which inspects the commits since the last release using [Conventional Commits](https://www.conventionalcommits.org/) to decide the next version, then bumps `package.json`, `package-lock.json`, `manifest.json`, updates `CHANGELOG.md`, tags the commit as `vX.Y.Z`, and publishes a Forgejo release with `main.js` and `manifest.json` as assets. No manual version bump or tag is needed for that repository.
+The Forgejo repository releases automatically: every push to `main` runs `semantic-release` (see `.releaserc.json`), which inspects the commits since the last release using [Conventional Commits](https://www.conventionalcommits.org/) to decide the next version, updates `package.json`, `package-lock.json`, and `manifest.json` in the CI workspace, tags the triggering commit as `vX.Y.Z`, and publishes a Forgejo release with `main.js` and `manifest.json` as assets. No manual version bump or tag is needed for that repository.
 
 To trigger a release, just merge Conventional Commit messages (`feat:`, `fix:`, etc.) into `main`. A commit type that doesn't map to a version bump (`chore:`, `docs:`, `refactor:`, ...) will not produce a release.
 
