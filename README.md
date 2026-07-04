@@ -70,6 +70,7 @@ BRAT installs the GitHub release assets into the vault plugin folder. The GitHub
 ```text
 main.js
 manifest.json
+plugin.zip
 ```
 
 After BRAT installs ObsidiSync, enable **ObsidiSync** under:
@@ -175,7 +176,7 @@ The Forgejo repository releases automatically: every push to `main` runs `semant
 
 To trigger a release, just merge Conventional Commit messages (`feat:`, `fix:`, etc.) into `main`. A commit type that doesn't map to a version bump (`chore:`, `docs:`, `refactor:`, ...) will not produce a release.
 
-The GitHub mirror release workflow (`.github/workflows/plugin-ci.yml`) is unaffected by this and still publishes a GitHub release whenever a `vX.Y.Z` tag is pushed there, so BRAT installs from GitHub keep working from tags pushed to that remote.
+The GitHub mirror release workflow (`.github/workflows/plugin-ci.yml`) is unaffected by this and still publishes a GitHub release whenever a `vX.Y.Z` tag is pushed there. It derives the release manifest version from the tag and uploads `main.js`, `manifest.json`, and `plugin.zip`, so BRAT installs from GitHub keep working from tags pushed to that remote.
 
 ## Run the Rust server
 

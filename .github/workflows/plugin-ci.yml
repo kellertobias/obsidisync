@@ -68,23 +68,40 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify tag matches manifest version
+      - name: Prepare release version
         run: |
-          node -e "const manifest = require('./manifest.json'); const tag = process.env.GITHUB_REF_NAME.replace(/^v/, ''); if (manifest.version !== tag) { console.error(`Tag ${process.env.GITHUB_REF_NAME} must match manifest version ${manifest.version}`); process.exit(1); }"
+          version="${GITHUB_REF_NAME#v}"
+          node -e "const version = process.argv[1]; if (!/^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) { console.error(`Tag ${process.env.GITHUB_REF_NAME} is not a supported semver release tag`); process.exit(1); }" "$version"
+          npm version "$version" --no-git-tag-version --allow-same-version
+          node scripts/sync-version.mjs "$version"
+          node -e "const pkg = require('./package.json'); const manifest = require('./manifest.json'); if (pkg.version !== manifest.version) { console.error(`package.json version ${pkg.version} does not match manifest version ${manifest.version}`); process.exit(1); }"
 
       - name: Build plugin
         run: npm run build:plugin
+
+      - name: Package plugin release
+        run: |
+          assets=(main.js manifest.json)
+          if [ -f styles.css ]; then
+            assets+=(styles.css)
+          fi
+          zip -r plugin.zip "${assets[@]}"
 
       - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          assets=(main.js manifest.json plugin.zip)
+          if [ -f styles.css ]; then
+            assets+=(styles.css)
+          fi
+
           if [ "$GITHUB_SERVER_URL" = "https://github.com" ]; then
             if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-              gh release upload "$GITHUB_REF_NAME" main.js manifest.json --clobber
+              gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
             else
-              gh release create "$GITHUB_REF_NAME" main.js manifest.json --title "$GITHUB_REF_NAME" --notes "Obsidian plugin release $GITHUB_REF_NAME"
+              gh release create "$GITHUB_REF_NAME" "${assets[@]}" --title "$GITHUB_REF_NAME" --notes "Obsidian plugin release $GITHUB_REF_NAME"
             fi
             exit 0
           fi
@@ -117,7 +134,7 @@ jobs:
           fi
 
           release_id="$(node -e "console.log(require(process.argv[1]).id)" "$release_json")"
-          for asset in main.js manifest.json; do
+          for asset in "${assets[@]}"; do
             node -e "const release = require(process.argv[1]); const name = process.argv[2]; for (const asset of release.assets || []) if (asset.name === name) console.log(asset.id)" "$release_json" "$asset" |
               while read -r asset_id; do
                 [ -n "$asset_id" ] || continue
