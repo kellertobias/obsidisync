@@ -89,17 +89,21 @@ impl RuntimeConfig {
                 })?;
             let scope = std::env::var("OIDC_DEVICE_SCOPE")
                 .unwrap_or_else(|_| "openid profile email".to_string());
-            let zitadel_base_url =
-                std::env::var("ZITADEL_BASE_URL").unwrap_or_else(|_| issuer.clone());
-            let zitadel_api_token = required_env("ZITADEL_API_TOKEN")?;
-            let zitadel = ZitadelAuthorization::new(zitadel_base_url, zitadel_api_token)?;
+            let zitadel = match std::env::var("ZITADEL_API_TOKEN") {
+                Ok(api_token) if !api_token.trim().is_empty() => {
+                    let base_url =
+                        std::env::var("ZITADEL_BASE_URL").unwrap_or_else(|_| issuer.clone());
+                    Some(ZitadelAuthorization::new(base_url, api_token)?)
+                }
+                _ => None,
+            };
             let auth = AuthVerifier::oidc(
                 issuer.clone(),
                 audience.clone(),
                 jwks_url,
                 user_claim,
                 data_dir.clone(),
-                Some(zitadel),
+                zitadel,
             )?;
             (
                 auth,

@@ -278,10 +278,10 @@ impl OidcVerifier {
         if user.trim().is_empty() || subject.trim().is_empty() {
             bail!("OIDC session subject is invalid");
         }
-        let Some(zitadel) = &self.zitadel else {
-            bail!("OIDC session renewal requires Zitadel authorization checking");
-        };
-        self.verify_zitadel_user_is_active(zitadel, subject).await
+        if let Some(zitadel) = &self.zitadel {
+            self.verify_zitadel_user_is_active(zitadel, subject).await?;
+        }
+        Ok(())
     }
 
     async fn verify_zitadel_user_is_active(

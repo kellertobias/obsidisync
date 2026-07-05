@@ -189,8 +189,8 @@ export OIDC_DEVICE_CLIENT_ID="obsidian-device"
 export OIDC_DEVICE_SCOPE="openid profile email"
 export OIDC_USER_CLAIM="preferred_username"
 export OIDC_JWKS_URL="https://issuer.example.com/keys" # optional; otherwise discovered from OIDC metadata
-export ZITADEL_API_TOKEN="replace-with-zitadel-service-user-token"
-export ZITADEL_BASE_URL="https://issuer.example.com" # optional; defaults to OIDC_ISSUER
+export ZITADEL_API_TOKEN="replace-with-zitadel-service-user-token" # optional; enables Zitadel active-user checks on refresh
+export ZITADEL_BASE_URL="https://issuer.example.com" # optional; defaults to OIDC_ISSUER when ZITADEL_API_TOKEN is set
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
 export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
 export OBSIDIAN_GIT_SYNC_MAX_BODY_BYTES="52428800"
@@ -236,7 +236,6 @@ docker run --rm \
   -e OIDC_AUDIENCE="obsidian-git-sync" \
   -e OIDC_DEVICE_CLIENT_ID="obsidian-device" \
   -e OIDC_USER_CLAIM="preferred_username" \
-  -e ZITADEL_API_TOKEN="replace-with-zitadel-service-user-token" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
   obsidian-git-sync-server
 ```
@@ -323,8 +322,8 @@ OIDC provider details are server configuration, not client setup. In OIDC mode t
 - `OIDC_DEVICE_CLIENT_ID`: public OIDC client configured for device authorization.
 - `OIDC_DEVICE_SCOPE`: optional, defaults to `openid profile email`.
 - `OIDC_USER_CLAIM`: optional, defaults to `preferred_username`.
-- `ZITADEL_API_TOKEN`: service-user token used by the server to verify the OIDC subject is still active during app-session refresh.
-- `ZITADEL_BASE_URL`: optional Zitadel API base URL, defaults to `OIDC_ISSUER`.
+- `ZITADEL_API_TOKEN`: optional service-user token used by the server to verify the OIDC subject is still active during app-session refresh for Zitadel deployments.
+- `ZITADEL_BASE_URL`: optional Zitadel API base URL, defaults to `OIDC_ISSUER` when `ZITADEL_API_TOKEN` is set.
 
 ## Version UI
 
