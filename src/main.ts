@@ -11,10 +11,13 @@ import { createClientId, generateComputerName, slugFromName } from "./runtime";
 import { DEFAULT_SETTINGS, IosGitSyncSettings, IosGitSyncSettingTab } from "./settings";
 import { sha256Hex } from "./vaultState";
 
+const LOGIN_RENEWAL_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
 export default class ObsidiSyncPlugin extends Plugin {
   settings: IosGitSyncSettings;
   private gitService: GitService;
   private timer: number | null = null;
+  private loginRenewalTimer: number | null = null;
   private conflictResolverOpen = false;
   private initialSyncModalOpen = false;
   private mobileSyncIndicatorEl: HTMLElement | null = null;
@@ -117,6 +120,7 @@ export default class ObsidiSyncPlugin extends Plugin {
     });
 
     this.resetSyncTimer();
+    this.resetLoginRenewalTimer();
 
     if (this.settings.syncOnStartup) {
       this.app.workspace.onLayoutReady(() => {
@@ -131,6 +135,10 @@ export default class ObsidiSyncPlugin extends Plugin {
     if (this.timer !== null) {
       window.clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.loginRenewalTimer !== null) {
+      window.clearInterval(this.loginRenewalTimer);
+      this.loginRenewalTimer = null;
     }
   }
 
@@ -185,6 +193,22 @@ export default class ObsidiSyncPlugin extends Plugin {
       this.runCommand(() => this.syncNow());
     }, this.settings.syncIntervalMinutes * 60 * 1000);
     this.registerInterval(this.timer);
+  }
+
+  resetLoginRenewalTimer(): void {
+    if (this.loginRenewalTimer !== null) {
+      window.clearInterval(this.loginRenewalTimer);
+      this.loginRenewalTimer = null;
+    }
+
+    const renew = () => {
+      this.gitService.renewLoginIfNeeded().catch((error) => {
+        console.error("ObsidiSync login renewal failed", error);
+      });
+    };
+    renew();
+    this.loginRenewalTimer = window.setInterval(renew, LOGIN_RENEWAL_CHECK_INTERVAL_MS);
+    this.registerInterval(this.loginRenewalTimer);
   }
 
   private async resetLocalSyncState(): Promise<void> {

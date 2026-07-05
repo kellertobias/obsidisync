@@ -335,7 +335,7 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
         "{site_cookie}"
     );
     assert!(site_cookie.contains("Path=/"), "{site_cookie}");
-    assert!(site_cookie.contains("Max-Age=43200"), "{site_cookie}");
+    assert!(site_cookie.contains("Max-Age=2592000"), "{site_cookie}");
     assert!(site_cookie.contains("HttpOnly"), "{site_cookie}");
     assert!(site_cookie.contains("SameSite=Strict"), "{site_cookie}");
     assert!(!site_cookie.contains("Secure"), "{site_cookie}");

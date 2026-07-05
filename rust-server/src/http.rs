@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 const SITE_SESSION_COOKIE: &str = "obsidisync_session";
+const SITE_SESSION_COOKIE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
 
@@ -801,7 +802,7 @@ fn redirect_with_site_session(location: &str, access_token: &str, secure: bool) 
             (
                 header::SET_COOKIE,
                 format!(
-                    "{SITE_SESSION_COOKIE}={}; Path=/; Max-Age=43200; HttpOnly; SameSite=Strict{secure_attribute}",
+                    "{SITE_SESSION_COOKIE}={}; Path=/; Max-Age={SITE_SESSION_COOKIE_MAX_AGE_SECONDS}; HttpOnly; SameSite=Strict{secure_attribute}",
                     cookie_encode(access_token),
                 ),
             ),

@@ -33,6 +33,9 @@ type LoginStatusListener = (status: LoginStatus) => void;
 type SyncBlocker = () => string | null;
 const MAIN_BRANCH = "main";
 const CLIENT_API_VERSION = 1;
+const OIDC_REFRESH_WINDOW_MS = 60_000;
+const OIDC_MAINTENANCE_REFRESH_WINDOW_MS = 60 * 60 * 1000;
+const OIDC_MAINTENANCE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface OidcDeviceAuthorization {
   device_code: string;
@@ -220,6 +223,22 @@ export class GitService {
     this.settings.lastLoginError = null;
     await this.saveSettings();
     this.emitLoginStatus();
+  }
+
+  async renewLoginIfNeeded(): Promise<boolean> {
+    if (!this.settings.oidcRefreshToken) return false;
+
+    const expiresAt = this.settings.oidcAccessTokenExpiresAt ? Date.parse(this.settings.oidcAccessTokenExpiresAt) : NaN;
+    if (!Number.isNaN(expiresAt) && expiresAt <= Date.now() + OIDC_MAINTENANCE_REFRESH_WINDOW_MS) {
+      return this.refreshOidcAccessToken();
+    }
+
+    const lastRefreshAt = this.settings.lastLoginAttemptAt ? Date.parse(this.settings.lastLoginAttemptAt) : NaN;
+    if (Number.isNaN(lastRefreshAt) || lastRefreshAt <= Date.now() - OIDC_MAINTENANCE_REFRESH_INTERVAL_MS) {
+      return this.refreshOidcAccessToken();
+    }
+
+    return false;
   }
 
   async sync(): Promise<SyncConflict[]> {
@@ -633,11 +652,11 @@ export class GitService {
     throw new Error(message);
   }
 
-  private async refreshExpiringOidcAccessToken(): Promise<void> {
+  private async refreshExpiringOidcAccessToken(windowMs = OIDC_REFRESH_WINDOW_MS): Promise<void> {
     if (!this.settings.oidcRefreshToken || !this.settings.oidcAccessTokenExpiresAt) return;
 
     const expiresAt = Date.parse(this.settings.oidcAccessTokenExpiresAt);
-    if (Number.isNaN(expiresAt) || expiresAt > Date.now() + 60_000) return;
+    if (Number.isNaN(expiresAt) || expiresAt > Date.now() + windowMs) return;
 
     if (!(await this.refreshOidcAccessToken())) {
       if (!this.settings.lastLoginError) {

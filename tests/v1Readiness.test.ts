@@ -22,11 +22,15 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(settingsSource, /refreshServerVersionOnLoad\(serverUrlSetting\)/);
   assert.match(settingsSource, /Sync server URL - server/);
   assert.match(mainSource, /refreshConnectionStatus\(\): Promise<ServerInfoResponse>/);
+  assert.match(mainSource, /resetLoginRenewalTimer\(\): void/);
+  assert.match(mainSource, /renewLoginIfNeeded\(\)/);
   assert.match(serviceSource, /CLIENT_API_VERSION = 1/);
   assert.match(serviceSource, /checkServerCompatibility\(\): Promise<ServerInfoResponse>/);
+  assert.match(serviceSource, /OIDC_MAINTENANCE_REFRESH_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
+  assert.match(serviceSource, /renewLoginIfNeeded\(\): Promise<boolean>/);
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
   assert.match(serviceSource, /body\.error === "invalid_grant"/);
-  assert.match(serviceSource, /refreshExpiringOidcAccessToken\(\): Promise<void>/);
+  assert.match(serviceSource, /refreshExpiringOidcAccessToken\(windowMs = OIDC_REFRESH_WINDOW_MS\): Promise<void>/);
   assert.match(serviceSource, /grant_type", "refresh_token"/);
   assert.match(serviceSource, /\/v1\/server\/info/);
   assert.match(serviceSource, /Login expired or unauthorized\. Log in to ObsidiSync again\./);
