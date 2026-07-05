@@ -35,12 +35,12 @@ test("file history view shows sync status, last save, source device, and sync ac
   assert.match(serviceSource, /this\.settings\.lastSyncedAt = new Date\(\)\.toISOString\(\)/);
   assert.match(mainSource, /lastSyncedAt: \(\) => this\.settings\.lastSyncedAt/);
   assert.match(viewSource, /sha256Hex/);
-  assert.match(viewSource, /"Up to date"/);
+  assert.match(viewSource, /`Up to date: version \$\{latest\.versionNumber\}`/);
   assert.match(viewSource, /"File changed"/);
   assert.match(viewSource, /this\.app\.vault\.on\("modify"/);
   assert.match(viewSource, /file\.path !== this\.filePath/);
   assert.match(viewSource, /if \(localIsNewer\)/);
-  assert.match(viewSource, /if \(localSha === latestVersion\.sha256\)[\s\S]*?title: "Up to date"[\s\S]*?const latestTime = Date\.parse\(latest\.date\)/);
+  assert.match(viewSource, /if \(localSha === latestVersion\.sha256\)[\s\S]*?title: `Up to date: version \$\{latest\.versionNumber\}`[\s\S]*?const latestTime = Date\.parse\(latest\.date\)/);
   assert.match(viewSource, /"Last saved"/);
   assert.match(viewSource, /"Source"/);
   assert.doesNotMatch(viewSource, /"Login"/);
@@ -107,6 +107,10 @@ test("file history list shows version numbers and keeps device status compact", 
   assert.match(viewSource, /private versionName\(entry: HistoryEntry\): string \| null/);
   assert.match(viewSource, /await this\.gitService\.saveVersionMetadata\(\{ path: sourcePath, hash, name: trimmed \|\| null, clearName: !trimmed \}\)/);
   assert.match(viewSource, /entry\.squashedIntoHash == null/);
+  assert.match(viewSource, /private visibleHistoryEntries\(\): HistoryEntry\[\]/);
+  assert.match(viewSource, /this\.fileStatus\?\.state === "up-to-date" \? this\.history\[0\]\?\.hash : null/);
+  assert.match(viewSource, /entry\.hash !== latestHash/);
+  assert.match(viewSource, /"No earlier versions for this file yet\."/);
   assert.match(viewSource, /private async squashVersion\(entry: HistoryEntry, intoEntry: HistoryEntry\): Promise<void>/);
   assert.match(viewSource, /class VersionNameModal extends Modal/);
   assert.match(viewSource, /contentEl\.createEl\("h2", \{ text: "Name version" \}\)/);

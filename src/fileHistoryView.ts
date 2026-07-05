@@ -16,6 +16,7 @@ interface FileSyncStatus {
   lastSaved: string;
   source: string;
   hasConflict: boolean;
+  versionNumber?: number;
 }
 
 interface VersionSource {
@@ -291,6 +292,13 @@ export class FileHistoryView extends ItemView {
       return;
     }
 
+    const visibleHistory = this.visibleHistoryEntries();
+
+    if (visibleHistory.length === 0) {
+      container.createEl("p", { text: "No earlier versions for this file yet." });
+      return;
+    }
+
     const list = container.createEl("div");
     list.style.display = "grid";
     list.style.alignContent = "start";
@@ -298,8 +306,6 @@ export class FileHistoryView extends ItemView {
     list.style.height = "100%";
     list.style.minHeight = "0";
     list.style.overflow = "auto";
-
-    const visibleHistory = this.history.filter((entry) => entry.squashedIntoHash == null).slice(0, 80);
 
     for (const [index, entry] of visibleHistory.entries()) {
       const versionNumber = entry.versionNumber;
@@ -408,6 +414,13 @@ export class FileHistoryView extends ItemView {
 
   private versionName(entry: HistoryEntry): string | null {
     return entry.name?.trim() || null;
+  }
+
+  private visibleHistoryEntries(): HistoryEntry[] {
+    const latestHash = this.fileStatus?.state === "up-to-date" ? this.history[0]?.hash : null;
+    return this.history
+      .filter((entry) => entry.squashedIntoHash == null && entry.hash !== latestHash)
+      .slice(0, 80);
   }
 
   private devicesPinnedAt(hash: string): string[] {
@@ -532,11 +545,12 @@ export class FileHistoryView extends ItemView {
       if (localSha === latestVersion.sha256) {
         return {
           state: "up-to-date",
-          title: "Up to date",
+          title: `Up to date: version ${latest.versionNumber}`,
           detail: "The open file matches the latest synced version.",
           lastSaved: latestSaved,
           source: latestSource.label,
-          hasConflict
+          hasConflict,
+          versionNumber: latest.versionNumber
         };
       }
 
