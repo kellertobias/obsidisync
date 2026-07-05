@@ -1,3 +1,4 @@
+pub mod app_session;
 pub mod auth;
 pub mod binary_store;
 pub mod git;

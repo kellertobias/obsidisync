@@ -66,7 +66,20 @@ export type ServerAuthConfig =
 
 interface PasswordLoginResponse {
   user: string;
+  subject?: string;
   accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  refreshExpiresIn: number;
+}
+
+interface ServerSessionResponse {
+  user: string;
+  subject: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  refreshExpiresIn: number;
 }
 
 interface AuthSessionResponse {
@@ -205,13 +218,7 @@ export class GitService {
     }
 
     const body = response.json as PasswordLoginResponse;
-    this.settings.oidcAccessToken = body.accessToken;
-    this.settings.oidcRefreshToken = "";
-    this.settings.oidcAccessTokenExpiresAt = null;
-    this.settings.lastLoginError = null;
-    this.settings.lastLoginAttemptAt = new Date().toISOString();
-    this.settings.userSlug = body.user;
-    await this.saveSettings();
+    await this.storeServerSessionResponse(body);
     this.emitLoginStatus();
   }
 
@@ -530,7 +537,7 @@ export class GitService {
       const body = response.json as OidcTokenResponse;
 
       if (response.status >= 200 && response.status < 300 && body.access_token) {
-        await this.storeOidcTokenResponse(body);
+        await this.exchangeOidcAccessToken(body.access_token);
         await this.loadAuthenticatedUser();
         this.settings.lastLoginError = null;
         this.settings.lastLoginAttemptAt = new Date().toISOString();
@@ -595,49 +602,54 @@ export class GitService {
     return info;
   }
 
-  private async storeOidcTokenResponse(body: OidcTokenResponse): Promise<void> {
-    if (!body.access_token) throw new Error("OIDC token response did not include an access token");
-    this.settings.oidcAccessToken = body.access_token;
+  private async storeServerSessionResponse(body: ServerSessionResponse | PasswordLoginResponse): Promise<void> {
+    if (!body.accessToken) throw new Error("Server session response did not include an access token");
+    if (!body.refreshToken) throw new Error("Server session response did not include a refresh token");
+    this.settings.oidcAccessToken = body.accessToken;
+    this.settings.oidcRefreshToken = body.refreshToken;
     this.settings.lastLoginError = null;
     this.settings.lastLoginAttemptAt = new Date().toISOString();
-    if (body.refresh_token) {
-      this.settings.oidcRefreshToken = body.refresh_token;
-    }
     this.settings.oidcAccessTokenExpiresAt =
-      typeof body.expires_in === "number" && Number.isFinite(body.expires_in) && body.expires_in > 0
-        ? new Date(Date.now() + body.expires_in * 1000).toISOString()
+      typeof body.expiresIn === "number" && Number.isFinite(body.expiresIn) && body.expiresIn > 0
+        ? new Date(Date.now() + body.expiresIn * 1000).toISOString()
         : null;
+    this.settings.userSlug = body.user;
     await this.saveSettings();
+  }
+
+  private async exchangeOidcAccessToken(oidcAccessToken: string): Promise<void> {
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
+    const response = await requestUrl({
+      url: `${serverUrl}/v1/auth/oidc/login`,
+      method: "POST",
+      contentType: "application/json",
+      body: JSON.stringify({ accessToken: oidcAccessToken }),
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(response.text || `OIDC server session exchange failed: HTTP ${response.status}`);
+    }
+    await this.storeServerSessionResponse(response.json as ServerSessionResponse);
   }
 
   private async refreshOidcAccessToken(): Promise<boolean> {
     if (!this.settings.oidcRefreshToken) return false;
 
-    const config = await this.serverOidcLoginConfig();
-    const discovery = await this.oidcDiscovery();
-    const params = new URLSearchParams();
-    params.set("grant_type", "refresh_token");
-    params.set("refresh_token", this.settings.oidcRefreshToken);
-    params.set("client_id", config.clientId);
-    if (config.audience) {
-      params.set("audience", config.audience);
-      params.set("resource", config.audience);
-    }
-
+    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
     const response = await requestUrl({
-      url: discovery.token_endpoint,
+      url: `${serverUrl}/v1/auth/session/refresh`,
       method: "POST",
-      contentType: "application/x-www-form-urlencoded",
-      body: params.toString(),
+      contentType: "application/json",
+      body: JSON.stringify({ refreshToken: this.settings.oidcRefreshToken }),
       throw: false
     });
-    const body = (response.json ?? {}) as OidcTokenResponse;
-    if (response.status >= 200 && response.status < 300 && body.access_token) {
-      await this.storeOidcTokenResponse(body);
+    const body = (response.json ?? {}) as Partial<ServerSessionResponse> & OidcTokenResponse;
+    if (response.status >= 200 && response.status < 300 && body.accessToken) {
+      await this.storeServerSessionResponse(body as ServerSessionResponse);
       return true;
     }
 
-    if (body.error === "invalid_grant") {
+    if (response.status === 401 || response.status === 403 || body.error === "invalid_grant") {
       this.settings.oidcRefreshToken = "";
       this.settings.oidcAccessTokenExpiresAt = null;
       this.settings.lastLoginError = "Re-login failed: refresh token was rejected. Log in to ObsidiSync again.";

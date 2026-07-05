@@ -189,6 +189,8 @@ export OIDC_DEVICE_CLIENT_ID="obsidian-device"
 export OIDC_DEVICE_SCOPE="openid profile email"
 export OIDC_USER_CLAIM="preferred_username"
 export OIDC_JWKS_URL="https://issuer.example.com/keys" # optional; otherwise discovered from OIDC metadata
+export ZITADEL_API_TOKEN="replace-with-zitadel-service-user-token"
+export ZITADEL_BASE_URL="https://issuer.example.com" # optional; defaults to OIDC_ISSUER
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
 export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
 export OBSIDIAN_GIT_SYNC_MAX_BODY_BYTES="52428800"
@@ -234,6 +236,7 @@ docker run --rm \
   -e OIDC_AUDIENCE="obsidian-git-sync" \
   -e OIDC_DEVICE_CLIENT_ID="obsidian-device" \
   -e OIDC_USER_CLAIM="preferred_username" \
+  -e ZITADEL_API_TOKEN="replace-with-zitadel-service-user-token" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
   obsidian-git-sync-server
 ```
@@ -243,7 +246,7 @@ The container listens on `0.0.0.0:8787` and stores server state in `/data`.
 Security defaults:
 
 - OIDC issuer/JWKS URLs must use HTTPS, except localhost development URLs.
-- Password mode stores an Argon2 password hash and hashed access tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json`.
+- Password mode stores the Argon2 password hash under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json` and hashed server session tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/sessions.json`.
 - First-time password setup requires `OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN` or the generated setup token printed in server logs.
 - Plugin server/OIDC URLs must use HTTPS, except localhost development URLs.
 - Leaving the Git remote URL blank is allowed and selects server-local Git storage in `OBSIDIAN_GIT_SYNC_DATA_DIR`.
@@ -273,7 +276,7 @@ Configure:
 Advanced settings:
 
 - Access token, only for static-token development servers or recovery.
-- Refresh token, stored after OIDC login when the provider returns one.
+- Refresh token, a server-issued single-use token used to renew the app session.
 - User namespace, normally set automatically from the authenticated server user.
 
 The plugin always registers vaults on the `main` branch and uses the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`.
@@ -301,7 +304,7 @@ The settings page shows:
 
 Use the **Check** button in the Server setting to verify server compatibility and the current authenticated session without starting a sync.
 
-If a sync is requested while another sync is running, ObsidiSync queues one follow-up sync and runs it immediately after the current sync finishes. If the server returns `401` or `403`, ObsidiSync attempts one OIDC refresh-token exchange when a refresh token is available. If refresh fails or no refresh token exists, log in again from ObsidiSync settings.
+If a sync is requested while another sync is running, ObsidiSync queues one follow-up sync and runs it immediately after the current sync finishes. If the server returns `401` or `403`, ObsidiSync attempts one server session refresh when a refresh token is available. If refresh fails or no refresh token exists, log in again from ObsidiSync settings.
 
 ### Login flow
 
@@ -310,7 +313,8 @@ The plugin only needs the sync server URL to start login:
 1. The plugin calls `GET /v1/auth/config`.
 2. In password mode, the plugin shows a username/password form and calls `/v1/auth/password/login` or `/v1/auth/password/setup`. First-time setup also requires the setup token.
 3. In OIDC mode, the server returns the public device-flow client configuration, and the plugin performs device login with the issuer advertised by the server.
-4. The plugin stores the returned access token and calls `GET /v1/auth/session` to set the user namespace.
+4. The plugin sends the OIDC access token to `POST /v1/auth/oidc/login` and stores only the server-issued access token and refresh token.
+5. The plugin calls `GET /v1/auth/session` to set the user namespace.
 
 OIDC provider details are server configuration, not client setup. In OIDC mode the server requires:
 
@@ -319,6 +323,8 @@ OIDC provider details are server configuration, not client setup. In OIDC mode t
 - `OIDC_DEVICE_CLIENT_ID`: public OIDC client configured for device authorization.
 - `OIDC_DEVICE_SCOPE`: optional, defaults to `openid profile email`.
 - `OIDC_USER_CLAIM`: optional, defaults to `preferred_username`.
+- `ZITADEL_API_TOKEN`: service-user token used by the server to verify the OIDC subject is still active during app-session refresh.
+- `ZITADEL_BASE_URL`: optional Zitadel API base URL, defaults to `OIDC_ISSUER`.
 
 ## Version UI
 
@@ -370,7 +376,8 @@ Do not restore only the Git repository without the binary object store. Binary f
 ## Server maintenance
 
 - Rotate password-mode tokens by stopping the server and deleting `auth/password.json`; then complete password setup again.
-- For OIDC, rotate tokens at the identity provider. Clients refresh expired access tokens automatically when a refresh token is available; otherwise they should log in again when the plugin reports an expired or unauthorized login.
+- Server-issued access tokens last 24 hours. Server-issued refresh tokens last 180 days, are rotated on every refresh, and can only be used once.
+- For OIDC, SSO is used for the initial login exchange. Clients refresh expired app sessions through the sync server; otherwise they should log in again when the plugin reports an expired or unauthorized login.
 - Keep `uploads/` on persistent storage while syncs are active. Stale upload directories can be removed only when no clients are syncing.
 - Keep the `binary/` object store with the Git repo. Pruning binary objects without checking Git metadata can break historical binary versions.
 - Monitor server logs for `request failed`, Git rebase failures, and upload verification failures.
@@ -379,6 +386,8 @@ Do not restore only the Git repository without the binary object store. Binary f
 
 - `GET /v1/auth/config`
 - `GET /v1/auth/session`
+- `POST /v1/auth/session/refresh`
+- `POST /v1/auth/oidc/login`
 - `POST /v1/auth/password/setup`
 - `POST /v1/auth/password/login`
 - `POST /v1/users/{user}/vaults/{vault}/register`
@@ -395,6 +404,6 @@ Do not restore only the Git repository without the binary object store. Binary f
 
 - The server sees plaintext vault contents.
 - End-to-end encrypted content is out of scope for v1 because it prevents server-side text merges.
-- OIDC device login is implemented. Refresh tokens are stored when the provider returns them; configure the provider scope, for example `offline_access`, if refresh tokens are required.
+- OIDC device login is implemented. The provider token is exchanged for server-issued session tokens and is not used as the API bearer token.
 - Binary file version retrieval depends on the server object store retaining the hash referenced by Git metadata.
-- The plugin stores access and refresh tokens in Obsidian plugin data. Use provider-side token rotation policies for OIDC. Password mode tokens can be rotated by deleting `auth/password.json` or resetting the password data directory.
+- The plugin stores server-issued access and refresh tokens in Obsidian plugin data. Password mode tokens can be rotated by deleting `auth/sessions.json` or resetting the password data directory.

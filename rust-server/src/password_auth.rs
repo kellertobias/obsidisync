@@ -1,19 +1,16 @@
+use crate::app_session::{AppSession, AppSessionStore};
 use crate::auth::normalize_user_claim;
 use anyhow::{anyhow, bail, Result};
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tokio::sync::Mutex;
 
-const MAX_SESSIONS: usize = 20;
 const MIN_PASSWORD_BYTES: usize = 12;
 
 #[derive(Debug)]
@@ -21,20 +18,17 @@ pub struct PasswordAuth {
     user: String,
     setup_token_hash: Option<String>,
     store_path: PathBuf,
+    sessions: AppSessionStore,
     lock: Mutex<()>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PasswordAuthSession {
-    pub access_token: String,
-    pub user: String,
-}
+pub type PasswordAuthSession = AppSession;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PasswordStore {
     user: String,
     password_hash: Option<String>,
+    #[serde(default)]
     sessions: Vec<PasswordSessionRecord>,
 }
 
@@ -50,6 +44,7 @@ impl PasswordAuth {
         data_dir: impl Into<PathBuf>,
         setup_token: Option<String>,
     ) -> Result<Self> {
+        let data_dir = data_dir.into();
         let user = normalize_user_claim(&user)?;
         let setup_token_hash = setup_token
             .as_deref()
@@ -59,7 +54,8 @@ impl PasswordAuth {
         Ok(Self {
             user,
             setup_token_hash,
-            store_path: data_dir.into().join("auth/password.json"),
+            store_path: data_dir.join("auth/password.json"),
+            sessions: AppSessionStore::new(data_dir),
             lock: Mutex::new(()),
         })
     }
@@ -85,9 +81,10 @@ impl PasswordAuth {
         }
 
         store.password_hash = Some(hash_password(password)?);
-        let session = self.issue_session(&mut store)?;
         self.write_store(&store).await?;
-        Ok(session)
+        self.sessions
+            .issue(self.user.clone(), self.user.clone())
+            .await
     }
 
     pub fn setup_token_is_required(&self) -> bool {
@@ -98,7 +95,7 @@ impl PasswordAuth {
         let _guard = self.lock.lock().await;
         self.ensure_login_user(username)?;
 
-        let mut store = self.read_store().await?;
+        let store = self.read_store().await?;
         let password_hash = store
             .password_hash
             .as_deref()
@@ -107,43 +104,33 @@ impl PasswordAuth {
             bail!("invalid username or password");
         }
 
-        let session = self.issue_session(&mut store)?;
         self.write_store(&store).await?;
-        Ok(session)
+        self.sessions
+            .issue(self.user.clone(), self.user.clone())
+            .await
     }
 
     pub async fn verify_token(&self, token: &str) -> Result<String> {
-        let store = self.read_store().await?;
-        if store.password_hash.is_none() {
+        if self.read_store().await?.password_hash.is_none() {
             bail!("password is not set");
         }
-
-        let token_hash = hash_token(token);
-        if store
-            .sessions
-            .iter()
-            .any(|session| constant_time_eq(&session.token_hash, &token_hash))
-        {
-            Ok(self.user.clone())
-        } else {
-            bail!("invalid bearer token")
-        }
+        Ok(self.sessions.verify_access_token(token).await?.user)
     }
 
-    fn issue_session(&self, store: &mut PasswordStore) -> Result<PasswordAuthSession> {
-        let access_token = random_token()?;
-        store.sessions.push(PasswordSessionRecord {
-            token_hash: hash_token(&access_token),
-            created_at: unix_now(),
-        });
-        if store.sessions.len() > MAX_SESSIONS {
-            let remove_count = store.sessions.len() - MAX_SESSIONS;
-            store.sessions.drain(0..remove_count);
+    pub async fn refresh_session(&self, refresh_token: &str) -> Result<AppSession> {
+        if self.read_store().await?.password_hash.is_none() {
+            bail!("password is not set");
         }
-        Ok(PasswordAuthSession {
-            access_token,
-            user: self.user.clone(),
-        })
+        self.sessions
+            .refresh(refresh_token, |user, subject| async move {
+                let expected = normalize_user_claim(&user)?;
+                if subject == expected {
+                    Ok(())
+                } else {
+                    bail!("password session subject is invalid")
+                }
+            })
+            .await
     }
 
     fn ensure_setup_user(&self, username: &str) -> Result<()> {
@@ -248,12 +235,6 @@ fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
         .is_ok())
 }
 
-fn random_token() -> Result<String> {
-    let mut token = [0_u8; 32];
-    getrandom::fill(&mut token).map_err(|error| anyhow!("random generator failed: {error}"))?;
-    Ok(URL_SAFE_NO_PAD.encode(token))
-}
-
 fn hash_token(token: &str) -> String {
     let digest = Sha256::digest(token.as_bytes());
     digest
@@ -280,11 +261,4 @@ fn temp_store_path(path: &Path) -> PathBuf {
     let mut temp_path = path.to_path_buf();
     temp_path.set_extension("json.tmp");
     temp_path
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

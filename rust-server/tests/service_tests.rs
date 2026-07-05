@@ -248,7 +248,48 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
     let login_body = response_json(login).await;
     assert_eq!(login_body["user"], "alice");
     let token = login_body["accessToken"].as_str().unwrap();
+    let refresh_token = login_body["refreshToken"].as_str().unwrap();
     assert!(!token.is_empty());
+    assert!(!refresh_token.is_empty());
+    assert_eq!(login_body["expiresIn"], 86_400);
+    assert_eq!(login_body["refreshExpiresIn"], 15_552_000);
+
+    let refresh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/session/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "refreshToken": refresh_token }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refresh.status(), StatusCode::OK);
+    let refresh_body = response_json(refresh).await;
+    let token = refresh_body["accessToken"].as_str().unwrap();
+    let rotated_refresh_token = refresh_body["refreshToken"].as_str().unwrap();
+    assert_ne!(token, login_body["accessToken"].as_str().unwrap());
+    assert_ne!(rotated_refresh_token, refresh_token);
+
+    let reused_refresh = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/session/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "refreshToken": refresh_token }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reused_refresh.status(), StatusCode::UNAUTHORIZED);
 
     let session = app
         .clone()
@@ -554,6 +595,37 @@ async fn password_setup_requires_bootstrap_token_when_configured() {
     assert_eq!(setup_with_token.status(), StatusCode::OK);
     let setup_body = response_json(setup_with_token).await;
     assert_eq!(setup_body["user"], "alice");
+    let setup_access_token = setup_body["accessToken"].as_str().unwrap();
+    let setup_refresh_token = setup_body["refreshToken"].as_str().unwrap();
+    assert!(!setup_access_token.is_empty());
+    assert!(!setup_refresh_token.is_empty());
+    assert_eq!(setup_body["expiresIn"], 86_400);
+    assert_eq!(setup_body["refreshExpiresIn"], 15_552_000);
+
+    let refreshed_setup = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/session/refresh")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "refreshToken": setup_refresh_token }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed_setup.status(), StatusCode::OK);
+    let refreshed_setup_body = response_json(refreshed_setup).await;
+    assert_ne!(
+        refreshed_setup_body["accessToken"].as_str().unwrap(),
+        setup_access_token
+    );
+    assert_ne!(
+        refreshed_setup_body["refreshToken"].as_str().unwrap(),
+        setup_refresh_token
+    );
 }
 
 #[tokio::test]

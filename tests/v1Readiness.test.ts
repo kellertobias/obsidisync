@@ -31,7 +31,9 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
   assert.match(serviceSource, /body\.error === "invalid_grant"/);
   assert.match(serviceSource, /refreshExpiringOidcAccessToken\(windowMs = OIDC_REFRESH_WINDOW_MS\): Promise<void>/);
-  assert.match(serviceSource, /grant_type", "refresh_token"/);
+  assert.match(serviceSource, /exchangeOidcAccessToken\(body\.access_token\)/);
+  assert.match(serviceSource, /\/v1\/auth\/oidc\/login/);
+  assert.match(serviceSource, /\/v1\/auth\/session\/refresh/);
   assert.match(serviceSource, /\/v1\/server\/info/);
   assert.match(serviceSource, /Login expired or unauthorized\. Log in to ObsidiSync again\./);
   assert.match(settingsSource, /setButtonText\("Check"\)/);

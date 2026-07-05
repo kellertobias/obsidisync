@@ -365,29 +365,29 @@ export class FileHistoryView extends ItemView {
       dateEl.style.overflow = "hidden";
       dateEl.style.textOverflow = "ellipsis";
       dateEl.style.whiteSpace = "nowrap";
-      if (pinnedDevices.length > 0) {
-        const pinEl = titleWrap.createEl("div", { text: `📍 ${pinnedDevices.join(", ")}` });
-        pinEl.style.display = "flex";
-        pinEl.style.alignItems = "center";
-        pinEl.style.fontSize = "12px";
-        pinEl.style.color = "var(--text-accent)";
-        pinEl.style.overflow = "hidden";
-        pinEl.style.textOverflow = "ellipsis";
-        pinEl.style.whiteSpace = "nowrap";
-        pinEl.title = `Currently on this version: ${pinnedDevices.join(", ")}`;
-      }
-      const deviceEl = row.createEl("div", { text: source.device });
+      const deviceEl = row.createEl("div");
       deviceEl.style.display = "flex";
       deviceEl.style.alignItems = "center";
       deviceEl.style.justifyContent = "flex-end";
       deviceEl.style.justifySelf = "end";
+      deviceEl.style.gap = "4px";
       deviceEl.style.fontSize = "12px";
       deviceEl.style.color = "var(--text-muted)";
       deviceEl.style.textAlign = "right";
-      deviceEl.style.overflow = "hidden";
-      deviceEl.style.textOverflow = "ellipsis";
-      deviceEl.style.whiteSpace = "nowrap";
       deviceEl.title = source.label;
+      const deviceNameEl = deviceEl.createEl("span", { text: source.device });
+      deviceNameEl.style.overflow = "hidden";
+      deviceNameEl.style.textOverflow = "ellipsis";
+      deviceNameEl.style.whiteSpace = "nowrap";
+      if (pinnedDevices.length > 0) {
+        const pinEl = deviceEl.createEl("span", { attr: { "aria-label": `Currently on this version: ${pinnedDevices.join(", ")}`, title: `Currently on this version: ${pinnedDevices.join(", ")}` } });
+        pinEl.style.display = "inline-flex";
+        pinEl.style.alignItems = "center";
+        pinEl.style.justifyContent = "center";
+        pinEl.style.flex = "0 0 auto";
+        pinEl.style.color = "var(--text-accent)";
+        setIcon(pinEl, "monitor-check");
+      }
 
       button.onclick = () => this.openVersion(entry, versionNumber);
 

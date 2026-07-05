@@ -1,3 +1,4 @@
+use crate::app_session::{AppSession, AppSessionStore};
 use crate::password_auth::{PasswordAuth, PasswordAuthSession};
 use anyhow::{anyhow, bail, Result};
 use axum::http::HeaderMap;
@@ -6,6 +7,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +36,23 @@ pub struct OidcVerifier {
     jwks: RwLock<Option<JwkSet>>,
     http_client: reqwest::Client,
     allowed_algorithms: Vec<Algorithm>,
+    sessions: AppSessionStore,
+    zitadel: Option<ZitadelAuthorization>,
+}
+
+#[derive(Clone)]
+pub struct ZitadelAuthorization {
+    base_url: String,
+    api_token: String,
+}
+
+impl fmt::Debug for ZitadelAuthorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZitadelAuthorization")
+            .field("base_url", &self.base_url)
+            .field("api_token", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -61,12 +80,40 @@ struct OpenIdConfiguration {
     jwks_uri: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ZitadelUserResponse {
+    user: ZitadelUser,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ZitadelUser {
+    id: Option<String>,
+    state: Option<String>,
+}
+
+impl ZitadelAuthorization {
+    pub fn new(base_url: String, api_token: String) -> Result<Self> {
+        let base_url = validate_oidc_https_url(&base_url, "Zitadel base URL")?;
+        let api_token = api_token.trim().to_string();
+        if api_token.is_empty() || api_token.chars().any(char::is_whitespace) {
+            bail!("Zitadel API token must not be empty or contain whitespace");
+        }
+        Ok(Self {
+            base_url,
+            api_token,
+        })
+    }
+}
+
 impl AuthVerifier {
     pub fn oidc(
         issuer: String,
         audience: String,
         jwks_url: Option<String>,
         user_claim: String,
+        data_dir: impl Into<PathBuf>,
+        zitadel: Option<ZitadelAuthorization>,
     ) -> Result<Self> {
         let issuer = validate_oidc_https_url(&issuer, "OIDC issuer")?;
         let jwks_url = jwks_url
@@ -82,6 +129,8 @@ impl AuthVerifier {
                 .timeout(Duration::from_secs(10))
                 .build()?,
             allowed_algorithms: default_oidc_algorithms(),
+            sessions: AppSessionStore::new(data_dir),
+            zitadel,
         })))
     }
 
@@ -142,6 +191,21 @@ impl AuthVerifier {
         }
     }
 
+    pub async fn login_oidc(&self, access_token: &str) -> Result<AppSession> {
+        match self {
+            AuthVerifier::Oidc(verifier) => verifier.login(access_token).await,
+            _ => bail!("OIDC login is not enabled"),
+        }
+    }
+
+    pub async fn refresh_session(&self, refresh_token: &str) -> Result<AppSession> {
+        match self {
+            AuthVerifier::Oidc(verifier) => verifier.refresh_session(refresh_token).await,
+            AuthVerifier::Password(verifier) => verifier.refresh_session(refresh_token).await,
+            AuthVerifier::StaticTokenForDev { .. } => bail!("refresh tokens are not enabled"),
+        }
+    }
+
     pub async fn verify_headers(&self, headers: &HeaderMap) -> Result<AuthContext> {
         self.verify_headers_inner(headers)
             .await
@@ -162,7 +226,7 @@ impl AuthVerifier {
 
     pub async fn verify_bearer_token(&self, token: &str) -> Result<AuthContext> {
         match self {
-            AuthVerifier::Oidc(verifier) => verifier.verify_token(token).await,
+            AuthVerifier::Oidc(verifier) => verifier.verify_session_token(token).await,
             AuthVerifier::Password(verifier) => {
                 let user = verifier.verify_token(token).await?;
                 Ok(AuthContext {
@@ -189,7 +253,63 @@ impl AuthVerifier {
 }
 
 impl OidcVerifier {
-    async fn verify_token(&self, token: &str) -> Result<AuthContext> {
+    async fn login(&self, oidc_access_token: &str) -> Result<AppSession> {
+        let auth = self.verify_oidc_token(oidc_access_token).await?;
+        self.sessions.issue(auth.user, auth.subject).await
+    }
+
+    async fn verify_session_token(&self, token: &str) -> Result<AuthContext> {
+        let session = self.sessions.verify_access_token(token).await?;
+        Ok(AuthContext {
+            subject: session.subject,
+            user: session.user,
+        })
+    }
+
+    async fn refresh_session(&self, refresh_token: &str) -> Result<AppSession> {
+        self.sessions
+            .refresh(refresh_token, |user, subject| async move {
+                self.ensure_subject_still_authorized(&user, &subject).await
+            })
+            .await
+    }
+
+    async fn ensure_subject_still_authorized(&self, user: &str, subject: &str) -> Result<()> {
+        if user.trim().is_empty() || subject.trim().is_empty() {
+            bail!("OIDC session subject is invalid");
+        }
+        let Some(zitadel) = &self.zitadel else {
+            bail!("OIDC session renewal requires Zitadel authorization checking");
+        };
+        self.verify_zitadel_user_is_active(zitadel, subject).await
+    }
+
+    async fn verify_zitadel_user_is_active(
+        &self,
+        zitadel: &ZitadelAuthorization,
+        subject: &str,
+    ) -> Result<()> {
+        let mut url = Url::parse(&zitadel.base_url)?;
+        {
+            let mut path = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("Zitadel base URL cannot be used for path segments"))?;
+            path.pop_if_empty();
+            path.extend(["management", "v1", "users", subject]);
+        }
+        let response = self
+            .http_client
+            .get(url)
+            .bearer_auth(&zitadel.api_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ZitadelUserResponse>()
+            .await?;
+        validate_zitadel_user_response(&response, subject)
+    }
+
+    async fn verify_oidc_token(&self, token: &str) -> Result<AuthContext> {
         let header = decode_header(token)?;
         if !self.allowed_algorithms.contains(&header.alg) {
             bail!("OIDC token algorithm is not allowed");
@@ -221,6 +341,10 @@ impl OidcVerifier {
         if let Some(jwks) = self.jwks.read().await.clone() {
             return Ok(jwks);
         }
+        self.refresh_jwks().await
+    }
+
+    async fn refresh_jwks(&self) -> Result<JwkSet> {
         let jwks_url = match &self.jwks_url {
             Some(value) => value.clone(),
             None => self.discover_jwks_uri().await?,
@@ -248,6 +372,17 @@ impl OidcVerifier {
             .json::<OpenIdConfiguration>()
             .await?;
         validate_oidc_https_url(&configuration.jwks_uri, "OIDC JWKS URL")
+    }
+}
+
+fn validate_zitadel_user_response(response: &ZitadelUserResponse, subject: &str) -> Result<()> {
+    if response.user.id.as_deref().is_some_and(|id| id != subject) {
+        bail!("Zitadel user subject mismatch");
+    }
+    match response.user.state.as_deref() {
+        Some("USER_STATE_ACTIVE") => Ok(()),
+        Some(state) => bail!("Zitadel user is not active: {state}"),
+        None => bail!("Zitadel user response did not include a state"),
     }
 }
 
@@ -380,6 +515,33 @@ mod tests {
         assert!(!allowed.contains(&Algorithm::HS256));
         assert!(allowed.contains(&Algorithm::RS256));
         assert!(allowed.contains(&Algorithm::EdDSA));
+    }
+
+    #[test]
+    fn zitadel_authorization_requires_matching_active_user() {
+        let active = ZitadelUserResponse {
+            user: ZitadelUser {
+                id: Some("subject-1".to_string()),
+                state: Some("USER_STATE_ACTIVE".to_string()),
+            },
+        };
+        assert!(validate_zitadel_user_response(&active, "subject-1").is_ok());
+
+        let inactive = ZitadelUserResponse {
+            user: ZitadelUser {
+                id: Some("subject-1".to_string()),
+                state: Some("USER_STATE_INACTIVE".to_string()),
+            },
+        };
+        assert!(validate_zitadel_user_response(&inactive, "subject-1").is_err());
+
+        let mismatch = ZitadelUserResponse {
+            user: ZitadelUser {
+                id: Some("subject-2".to_string()),
+                state: Some("USER_STATE_ACTIVE".to_string()),
+            },
+        };
+        assert!(validate_zitadel_user_response(&mismatch, "subject-1").is_err());
     }
 
     #[tokio::test]

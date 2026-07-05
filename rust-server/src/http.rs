@@ -94,6 +94,7 @@ impl IntoResponse for ApiError {
             || message.contains("authorization")
             || message.contains("OIDC")
             || message.contains("bearer")
+            || message.contains("refresh token")
             || message.contains("invalid username or password")
             || message.contains("password is not set")
         {
@@ -127,6 +128,8 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
         .route("/v1/server/info", get(server_info))
         .route("/v1/auth/config", get(auth_config))
         .route("/v1/auth/session", get(auth_session))
+        .route("/v1/auth/session/refresh", post(refresh_session))
+        .route("/v1/auth/oidc/login", post(login_oidc))
         .route("/v1/auth/password/setup", post(setup_password))
         .route("/v1/auth/password/login", post(login_password))
         .route("/v1/users/:user/feed", get(feed))
@@ -233,6 +236,18 @@ struct PasswordLoginForm {
     password: String,
     password_confirm: Option<String>,
     setup_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OidcLoginRequest {
+    access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RefreshSessionRequest {
+    refresh_token: String,
 }
 
 async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
@@ -350,6 +365,25 @@ async fn login_password(
             .auth
             .login_password(&request.username, &request.password)
             .await?,
+    ))
+}
+
+async fn login_oidc(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<OidcLoginRequest>,
+) -> Result<Json<crate::app_session::AppSession>, ApiError> {
+    if !matches!(state.public_auth, PublicAuthConfig::Oidc { .. }) {
+        return Err(ApiError(anyhow::anyhow!("OIDC login is not enabled")));
+    }
+    Ok(Json(state.auth.login_oidc(&request.access_token).await?))
+}
+
+async fn refresh_session(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<RefreshSessionRequest>,
+) -> Result<Json<crate::app_session::AppSession>, ApiError> {
+    Ok(Json(
+        state.auth.refresh_session(&request.refresh_token).await?,
     ))
 }
 

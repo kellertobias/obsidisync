@@ -98,7 +98,7 @@ test("file history view opens selected versions with the regular Obsidian file U
   assert.doesNotMatch(viewSource, /Restore binary file/);
 });
 
-test("file history list shows version numbers and aligns source device right", () => {
+test("file history list shows version numbers and keeps device status compact", () => {
   const viewSource = readFileSync(join(root, "src", "fileHistoryView.ts"), "utf8");
 
   assert.match(viewSource, /const versionNumber = entry\.versionNumber/);
@@ -126,6 +126,10 @@ test("file history list shows version numbers and aligns source device right", (
   assert.match(viewSource, /deviceEl\.style\.justifyContent = "flex-end"/);
   assert.match(viewSource, /deviceEl\.style\.justifySelf = "end"/);
   assert.match(viewSource, /deviceEl\.style\.textAlign = "right"/);
+  assert.match(viewSource, /const deviceNameEl = deviceEl\.createEl\("span", \{ text: source\.device \}\)/);
+  assert.match(viewSource, /setIcon\(pinEl, "monitor-check"\)/);
+  assert.match(viewSource, /title: `Currently on this version: \$\{pinnedDevices\.join\(", "\)\}`/);
+  assert.doesNotMatch(viewSource, /text: `📍 \$\{pinnedDevices\.join\(", "\)\}`/);
 });
 
 test("file history keeps the status header sticky and lets the version list fill available height", () => {
