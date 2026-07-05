@@ -28,8 +28,12 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(serviceSource, /checkServerCompatibility\(\): Promise<ServerInfoResponse>/);
   assert.match(serviceSource, /OIDC_MAINTENANCE_REFRESH_INTERVAL_MS = 24 \* 60 \* 60 \* 1000/);
   assert.match(serviceSource, /renewLoginIfNeeded\(\): Promise<boolean>/);
+  assert.match(serviceSource, /private refreshInFlight: Promise<boolean> \| null = null/);
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
+  assert.match(serviceSource, /if \(this\.refreshInFlight\) return this\.refreshInFlight/);
+  assert.match(serviceSource, /refreshOidcAccessTokenOnce\(refreshToken: string\): Promise<boolean>/);
   assert.match(serviceSource, /body\.error === "invalid_grant"/);
+  assert.match(serviceSource, /if \(this\.settings\.oidcRefreshToken !== refreshToken\) return true/);
   assert.match(serviceSource, /storeServerSessionResponse[\s\S]*?this\.settings\.oidcRefreshToken = body\.refreshToken[\s\S]*?this\.emitLoginStatus\(\)/);
   assert.match(serviceSource, /refreshExpiringOidcAccessToken\(windowMs = OIDC_REFRESH_WINDOW_MS\): Promise<void>/);
   assert.match(serviceSource, /exchangeOidcAccessToken\(body\.access_token\)/);

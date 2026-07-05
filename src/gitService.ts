@@ -101,6 +101,7 @@ export class GitService {
   private oidcDiscoveryCache: OidcDiscovery | null = null;
   private oidcLoginConfig: Extract<ServerAuthConfig, { type: "oidc" }> | null = null;
   private oidcLoginServerUrl: string | null = null;
+  private refreshInFlight: Promise<boolean> | null = null;
 
   constructor(
     private readonly vault: Vault,
@@ -634,14 +635,24 @@ export class GitService {
   }
 
   private async refreshOidcAccessToken(): Promise<boolean> {
-    if (!this.settings.oidcRefreshToken) return false;
+    if (this.refreshInFlight) return this.refreshInFlight;
 
+    const refreshToken = this.settings.oidcRefreshToken;
+    if (!refreshToken) return false;
+
+    this.refreshInFlight = this.refreshOidcAccessTokenOnce(refreshToken).finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async refreshOidcAccessTokenOnce(refreshToken: string): Promise<boolean> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
     const response = await requestUrl({
       url: `${serverUrl}/v1/auth/session/refresh`,
       method: "POST",
       contentType: "application/json",
-      body: JSON.stringify({ refreshToken: this.settings.oidcRefreshToken }),
+      body: JSON.stringify({ refreshToken }),
       throw: false
     });
     const body = (response.json ?? {}) as Partial<ServerSessionResponse> & OidcTokenResponse;
@@ -651,6 +662,7 @@ export class GitService {
     }
 
     if (response.status === 401 || response.status === 403 || body.error === "invalid_grant") {
+      if (this.settings.oidcRefreshToken !== refreshToken) return true;
       this.settings.oidcRefreshToken = "";
       this.settings.oidcAccessTokenExpiresAt = null;
       this.settings.lastLoginError = "Re-login failed: refresh token was rejected. Log in to ObsidiSync again.";
