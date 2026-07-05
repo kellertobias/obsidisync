@@ -43,8 +43,8 @@ test("file history view shows sync status, last save, source device, and sync ac
   assert.match(viewSource, /if \(localSha === latestVersion\.sha256\)[\s\S]*?title: "Up to date"[\s\S]*?const latestTime = Date\.parse\(latest\.date\)/);
   assert.match(viewSource, /"Last saved"/);
   assert.match(viewSource, /"Source"/);
-  assert.match(viewSource, /"Login"/);
-  assert.match(viewSource, /onLoginStatusChange/);
+  assert.doesNotMatch(viewSource, /"Login"/);
+  assert.doesNotMatch(viewSource, /onLoginStatusChange/);
   assert.match(serviceSource, /state: "not-logged-in"/);
   assert.match(serviceSource, /state: "failed"/);
   assert.match(serviceSource, /Re-login failed/);

@@ -1,6 +1,6 @@
 import { App, ItemView, MarkdownView, Modal, Notice, setIcon, Setting, TFile, WorkspaceLeaf } from "obsidian";
 import { base64ToArrayBuffer } from "./base64";
-import { GitService, LoginStatus } from "./gitService";
+import { GitService } from "./gitService";
 import { HISTORY_SNAPSHOT_DIR } from "./ignore";
 import { DeviceVersionEntry, HistoryEntry } from "./protocol";
 import { sha256Hex } from "./vaultState";
@@ -45,7 +45,6 @@ export class FileHistoryView extends ItemView {
   private selectedHash: string | null = null;
   private requestId = 0;
   private syncing = false;
-  private loginStatus: LoginStatus | null = null;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -72,12 +71,6 @@ export class FileHistoryView extends ItemView {
       this.gitService.onSyncStateChange((running) => {
         if (this.syncing === running) return;
         this.syncing = running;
-        void this.refresh();
-      })
-    );
-    this.register(
-      this.gitService.onLoginStatusChange((status) => {
-        this.loginStatus = status;
         void this.refresh();
       })
     );
@@ -252,7 +245,6 @@ export class FileHistoryView extends ItemView {
 
     this.renderMeta(meta, "Last saved", status?.lastSaved ?? "Checking...");
     this.renderMeta(meta, "Source", status?.source ?? "Checking...");
-    this.renderMeta(meta, "Login", this.loginStatusText());
   }
 
   private renderNoActiveFile(container: HTMLElement): void {
@@ -268,11 +260,6 @@ export class FileHistoryView extends ItemView {
 
     const lastSynced = empty.createEl("div", { text: `Last Synced: ${formatLastSynced(this.snapshots.lastSyncedAt())}` });
     lastSynced.style.fontWeight = "700";
-
-    const login = empty.createEl("div", { text: this.loginStatusText() });
-    login.style.fontSize = "12px";
-    login.style.color = loginStatusColor(this.loginStatus?.state ?? "not-logged-in");
-    login.style.fontWeight = "600";
 
     const syncButton = empty.createEl("button", { text: this.syncing ? "Syncing" : "Sync Now", attr: { type: "button" } });
     syncButton.disabled = this.syncing;
@@ -606,11 +593,6 @@ export class FileHistoryView extends ItemView {
     return `This device - ${this.gitService.currentDeviceName()}`;
   }
 
-  private loginStatusText(): string {
-    const status = this.loginStatus ?? this.gitService.loginStatus();
-    return status.detail ? `${status.title}: ${status.detail}` : status.title;
-  }
-
   private describeSource(entry: HistoryEntry): VersionSource {
     const device = entry.deviceName?.trim() || extractSyncDevice(entry.subject) || entry.author.trim() || "Unknown device";
     if (isServerSource(device)) {
@@ -730,12 +712,6 @@ function statusColor(state: SyncState): string {
   if (state === "server-newer") return "var(--color-yellow)";
   if (state === "not-synced") return "var(--text-accent)";
   return "var(--background-modifier-border-hover)";
-}
-
-function loginStatusColor(state: LoginStatus["state"]): string {
-  if (state === "logged-in") return "var(--color-green)";
-  if (state === "failed") return "var(--color-red)";
-  return "var(--text-muted)";
 }
 
 function hasConflictMarkers(content: string): boolean {
