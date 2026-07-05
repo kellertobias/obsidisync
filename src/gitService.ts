@@ -117,6 +117,7 @@ export class GitService {
       this.oidcLoginServerUrl = null;
     }
     this.settings = settings;
+    this.emitLoginStatus();
   }
 
   currentDeviceName(): string {
@@ -219,7 +220,6 @@ export class GitService {
 
     const body = response.json as PasswordLoginResponse;
     await this.storeServerSessionResponse(body);
-    this.emitLoginStatus();
   }
 
   async loadAuthenticatedUser(): Promise<void> {
@@ -615,6 +615,7 @@ export class GitService {
         : null;
     this.settings.userSlug = body.user;
     await this.saveSettings();
+    this.emitLoginStatus();
   }
 
   private async exchangeOidcAccessToken(oidcAccessToken: string): Promise<void> {

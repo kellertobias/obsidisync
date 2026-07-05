@@ -30,6 +30,7 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(serviceSource, /renewLoginIfNeeded\(\): Promise<boolean>/);
   assert.match(serviceSource, /refreshOidcAccessToken\(\): Promise<boolean>/);
   assert.match(serviceSource, /body\.error === "invalid_grant"/);
+  assert.match(serviceSource, /storeServerSessionResponse[\s\S]*?this\.settings\.oidcRefreshToken = body\.refreshToken[\s\S]*?this\.emitLoginStatus\(\)/);
   assert.match(serviceSource, /refreshExpiringOidcAccessToken\(windowMs = OIDC_REFRESH_WINDOW_MS\): Promise<void>/);
   assert.match(serviceSource, /exchangeOidcAccessToken\(body\.access_token\)/);
   assert.match(serviceSource, /\/v1\/auth\/oidc\/login/);
@@ -37,6 +38,8 @@ test("plugin records persistent sync health and compatibility state", () => {
   assert.match(serviceSource, /\/v1\/server\/info/);
   assert.match(serviceSource, /Login expired or unauthorized\. Log in to ObsidiSync again\./);
   assert.match(settingsSource, /setButtonText\("Check"\)/);
+  assert.match(settingsSource, /onLoginStatusChange[\s\S]*?accessTokenText\?\.setValue\(this\.plugin\.settings\.oidcAccessToken\)/);
+  assert.match(settingsSource, /onLoginStatusChange[\s\S]*?refreshTokenText\?\.setValue\(this\.plugin\.settings\.oidcRefreshToken\)/);
 });
 
 test("plugin queues overlapping sync requests and summarizes local changes", () => {

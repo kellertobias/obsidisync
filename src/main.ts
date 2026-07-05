@@ -3,7 +3,7 @@ import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
 import { ConflictResolverModal } from "./conflictResolverModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
-import { GitService } from "./gitService";
+import { GitService, LoginStatus } from "./gitService";
 import { InitialSyncModal } from "./initialSyncModal";
 import { OidcDeviceLoginModal } from "./oidcModal";
 import { ServerInfoResponse, SyncConflict } from "./protocol";
@@ -160,6 +160,10 @@ export default class ObsidiSyncPlugin extends Plugin {
     new AuthLoginModal(this.app, this.gitService, async () => {
       await this.saveSettings();
     }).open();
+  }
+
+  onLoginStatusChange(listener: (status: LoginStatus) => void): () => void {
+    return this.gitService.onLoginStatusChange(listener);
   }
 
   isSyncRunning(): boolean {

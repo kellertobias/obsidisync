@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import ObsidiSyncPlugin from "./main";
 import { ManifestEntry } from "./protocol";
 
@@ -92,6 +92,7 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
 export class IosGitSyncSettingTab extends PluginSettingTab {
   plugin: ObsidiSyncPlugin;
   private serverRefreshRequest = 0;
+  private loginStatusUnsubscribe: (() => void) | null = null;
 
   constructor(app: App, plugin: ObsidiSyncPlugin) {
     super(app, plugin);
@@ -100,6 +101,8 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
+    this.loginStatusUnsubscribe?.();
+    this.loginStatusUnsubscribe = null;
     containerEl.empty();
 
     const serverUrlSetting = new Setting(containerEl)
@@ -116,9 +119,9 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       );
     this.refreshServerVersionOnLoad(serverUrlSetting);
 
-    new Setting(containerEl)
+    const loginSetting = new Setting(containerEl)
       .setName("Login")
-      .setDesc(this.plugin.settings.oidcAccessToken ? `Logged in as ${this.plugin.settings.userSlug || "configured user"}.` : "Fetch login settings from the sync server and store the access token automatically.")
+      .setDesc(loginDescription(this.plugin.settings))
       .addButton((button) =>
         button.setCta().setButtonText(this.plugin.settings.oidcAccessToken ? "Log in again" : "Log in").onClick(() => {
           this.plugin.openLoginModal();
@@ -215,10 +218,14 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h3", { text: "Advanced" });
 
+    let accessTokenText: TextComponent | null = null;
+    let refreshTokenText: TextComponent | null = null;
+
     new Setting(containerEl)
       .setName("Access token")
       .setDesc("Manual fallback for static-token development servers or recovery.")
       .addText((text) => {
+        accessTokenText = text;
         text.inputEl.type = "password";
         text.setValue(this.plugin.settings.oidcAccessToken).onChange(async (value) => {
           this.plugin.settings.oidcAccessToken = value;
@@ -230,6 +237,7 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
       .setName("Refresh token")
       .setDesc("Stored after OIDC login when the provider returns one. Used to refresh expired access tokens.")
       .addText((text) => {
+        refreshTokenText = text;
         text.inputEl.type = "password";
         text.setValue(this.plugin.settings.oidcRefreshToken).onChange(async (value) => {
           this.plugin.settings.oidcRefreshToken = value;
@@ -258,6 +266,17 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         })
       );
+
+    this.loginStatusUnsubscribe = this.plugin.onLoginStatusChange(() => {
+      loginSetting.setDesc(loginDescription(this.plugin.settings));
+      accessTokenText?.setValue(this.plugin.settings.oidcAccessToken);
+      refreshTokenText?.setValue(this.plugin.settings.oidcRefreshToken);
+    });
+  }
+
+  hide(): void {
+    this.loginStatusUnsubscribe?.();
+    this.loginStatusUnsubscribe = null;
   }
 
   private refreshServerVersionOnLoad(setting: Setting): void {
@@ -279,6 +298,13 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
 function syncServerUrlName(settings: IosGitSyncSettings): string {
   return settings.serverVersion ? `Sync server URL - server ${settings.serverVersion}` : "Sync server URL";
+}
+
+function loginDescription(settings: IosGitSyncSettings): string {
+  if (settings.lastLoginError) return `Login needs attention: ${settings.lastLoginError}`;
+  return settings.oidcAccessToken
+    ? `Logged in as ${settings.userSlug || "configured user"}.`
+    : "Fetch login settings from the sync server and store the access token automatically.";
 }
 
 function syncStatusDescription(settings: IosGitSyncSettings): string {
