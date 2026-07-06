@@ -31,7 +31,7 @@ export function parseConflictDocument(text: string): ParsedConflictDocument | nu
 
   while (index < lines.length) {
     const line = lines[index];
-    if (!line.startsWith("<<<<<<<")) {
+    if (!isConflictStartLine(line)) {
       common += line;
       index += 1;
       continue;
@@ -44,7 +44,7 @@ export function parseConflictDocument(text: string): ParsedConflictDocument | nu
 
     index += 1;
     let server = "";
-    while (index < lines.length && !lines[index].startsWith("=======")) {
+    while (index < lines.length && !isConflictSeparatorLine(lines[index])) {
       server += lines[index];
       index += 1;
     }
@@ -52,7 +52,7 @@ export function parseConflictDocument(text: string): ParsedConflictDocument | nu
 
     index += 1;
     let local = "";
-    while (index < lines.length && !lines[index].startsWith(">>>>>>>")) {
+    while (index < lines.length && !isConflictEndLine(lines[index])) {
       local += lines[index];
       index += 1;
     }
@@ -77,6 +77,29 @@ export function buildResolvedText(parsed: ParsedConflictDocument, choose: (hunk:
       return selected.side === "server" ? segment.hunk.server : segment.hunk.local;
     })
     .join("");
+}
+
+export function hasConflictMarkers(text: string): boolean {
+  const lines = splitLines(text);
+  const startIndex = lines.findIndex((line) => isConflictStartLine(line));
+  if (startIndex === -1) return false;
+  const separatorIndex = lines.findIndex(
+    (line, index) => index > startIndex && isConflictSeparatorLine(line)
+  );
+  if (separatorIndex === -1) return false;
+  return lines.some((line, index) => index > separatorIndex && isConflictEndLine(line));
+}
+
+export function isConflictStartLine(line: string): boolean {
+  return line.trimEnd() === "<<<<<<< server";
+}
+
+export function isConflictSeparatorLine(line: string): boolean {
+  return line.trimEnd() === "=======";
+}
+
+export function isConflictEndLine(line: string): boolean {
+  return line.trimEnd() === ">>>>>>> client";
 }
 
 function splitLines(text: string): string[] {

@@ -1,5 +1,11 @@
 import { App, Modal, Notice, TFile } from "obsidian";
-import { buildResolvedText, ConflictHunk, ParsedConflictDocument, parseConflictDocument } from "./conflictParser";
+import {
+  buildResolvedText,
+  ConflictHunk,
+  hasConflictMarkers,
+  ParsedConflictDocument,
+  parseConflictDocument
+} from "./conflictParser";
 import { GitService } from "./gitService";
 import { SyncConflict } from "./protocol";
 
@@ -425,10 +431,6 @@ export class ConflictResolverModal extends Modal {
     button.onclick = onClick;
     return button;
   }
-}
-
-function hasConflictMarkers(text: string): boolean {
-  return text.includes("<<<<<<<") && text.includes("=======") && text.includes(">>>>>>>");
 }
 
 function errorMessage(error: unknown): string {

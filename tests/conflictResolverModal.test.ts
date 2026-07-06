@@ -5,6 +5,12 @@ import { join } from "node:path";
 
 const root = process.cwd();
 
+test("conflict resolver scans the vault using the shared conflict-marker detector", () => {
+  const source = readFileSync(join(root, "src", "conflictResolverModal.ts"), "utf8");
+
+  assert.match(source, /if \(!hasConflictMarkers\(content\)\) return;/);
+});
+
 test("merge conflict editor puts version buttons under their text previews", () => {
   const source = readFileSync(join(root, "src", "conflictResolverModal.ts"), "utf8");
 
