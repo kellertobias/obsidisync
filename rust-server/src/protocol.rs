@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +166,10 @@ pub struct DeviceEntry {
     pub device_name: String,
     pub last_synced_head: String,
     pub last_synced_at: String,
+    /// Commit hash as of which this device last pushed or pulled each path. Absence of an entry
+    /// means the device has never synced that path, distinct from "synced it and it's now gone."
+    #[serde(default)]
+    pub paths: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

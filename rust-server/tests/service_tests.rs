@@ -1192,6 +1192,160 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
 }
 
 #[tokio::test]
+async fn brand_new_file_does_not_conflict_when_device_never_touched_the_path() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Existing.md", b"seed\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+
+    // A stale device syncs once, before "Ghost.md" is ever created anywhere.
+    let stale = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "stale-device".to_string(),
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    let stale_base = stale.server_head.clone();
+
+    // A different device creates and then deletes "Ghost.md" without the stale device ever
+    // syncing (and therefore never touching that path).
+    let creator_base = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "creator-device".to_string(),
+                changes: vec![upsert("Ghost.md", b"boo\n")],
+                ..empty_sync(stale_base.clone())
+            },
+        )
+        .await
+        .unwrap()
+        .server_head;
+    service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "creator-device".to_string(),
+                changes: vec![ClientChange::Delete {
+                    path: "Ghost.md".to_string(),
+                }],
+                ..empty_sync(creator_base)
+            },
+        )
+        .await
+        .unwrap();
+
+    // The stale device, still holding its old base_head from before "Ghost.md" ever existed,
+    // now creates a brand-new file with that same name. It never saw the create or the delete,
+    // so this must not be reported as "server deleted file while client edited it".
+    let recreated = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "stale-device".to_string(),
+                changes: vec![upsert("Ghost.md", b"totally new content\n")],
+                ..empty_sync(stale_base)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recreated.status, SyncStatus::Ok, "{:?}", recreated.conflicts);
+
+    let clone = fixture.clone_remote("brand-new-check").await;
+    assert_eq!(
+        fs::read_to_string(clone.join("Ghost.md")).await.unwrap(),
+        "totally new content\n"
+    );
+}
+
+#[tokio::test]
+async fn stale_edit_of_a_path_the_device_has_seen_before_still_conflicts() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+
+    // Device B's own first sync picks up Note.md via changed_files_since, so its per-path ack
+    // for Note.md is genuinely populated before it goes stale.
+    let device_b_first = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    let stale_base = device_b_first.server_head.clone();
+
+    // Device A also does its own real first sync (picking up Note.md the same way), then edits it.
+    service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-a".to_string(),
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    let device_a = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-a".to_string(),
+                base_head: stale_base.clone(),
+                changes: vec![upsert("Note.md", b"hello from A\n")],
+                ..empty_sync(stale_base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a.status, SyncStatus::Ok);
+
+    // Device B, still holding its now-stale base_head from before A's edit, edits its own
+    // outdated copy of a path it has genuinely seen before.
+    let device_b = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                base_head: stale_base.clone(),
+                changes: vec![upsert("Note.md", b"hello from B\n")],
+                ..empty_sync(stale_base)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        device_b.status,
+        SyncStatus::Conflict,
+        "device that has genuinely seen this path before should still get a real conflict"
+    );
+    assert_eq!(device_b.conflicts[0].path, "Note.md");
+}
+
+#[tokio::test]
 async fn detects_binary_conflicts_without_overwriting_client_file() {
     let fixture = GitFixture::new().await;
     fixture.seed_file("Note.md", b"hello\n").await;

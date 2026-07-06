@@ -63,6 +63,12 @@ struct UploadState {
     complete: bool,
 }
 
+#[derive(Default)]
+struct TouchedPaths {
+    upserts: Vec<String>,
+    deletes: Vec<String>,
+}
+
 struct ClientChangeContext<'a> {
     user: &'a str,
     vault: &'a str,
@@ -70,6 +76,7 @@ struct ClientChangeContext<'a> {
     binary_root: &'a Path,
     upload_root: &'a Path,
     base_head: Option<&'a str>,
+    device_paths: &'a HashMap<String, String>,
 }
 
 impl VaultState {
@@ -266,6 +273,12 @@ impl VaultService {
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
             let upload_root = self.upload_dir(&user, &vault);
+            let device_paths = read_devices(&self.devices_path(&user, &vault))
+                .await?
+                .devices
+                .remove(&request.client_id)
+                .map(|device| device.paths)
+                .unwrap_or_default();
             self.configure_git(&repo, &state).await?;
             if state.uses_remote() {
                 self.fetch(&repo).await?;
@@ -296,6 +309,7 @@ impl VaultService {
                         binary_root: &binary_root,
                         upload_root: &upload_root,
                         base_head: base_head.as_deref(),
+                        device_paths: &device_paths,
                     },
                     &request.changes,
                 )
@@ -361,12 +375,26 @@ impl VaultService {
 
             let server_head = self.head_from_repo(&repo).await?;
             if let Some(head) = &server_head {
+                let mut touched = TouchedPaths::default();
+                for change in &request.changes {
+                    match change {
+                        ClientChange::Upsert { path, .. } => touched.upserts.push(path.clone()),
+                        ClientChange::Delete { path } => touched.deletes.push(path.clone()),
+                    }
+                }
+                for file in &files {
+                    match file {
+                        ServerFileChange::Upsert { path, .. } => touched.upserts.push(path.clone()),
+                        ServerFileChange::Delete { path } => touched.deletes.push(path.clone()),
+                    }
+                }
                 self.upsert_device(
                     &user,
                     &vault,
                     &request.client_id,
                     &request.device_name,
                     head,
+                    &touched,
                 )
                 .await?;
             }
@@ -388,18 +416,27 @@ impl VaultService {
         client_id: &str,
         device_name: &str,
         head: &str,
+        touched: &TouchedPaths,
     ) -> Result<()> {
         let path = self.devices_path(user, vault);
         let mut registry = read_devices(&path).await?;
-        registry.devices.insert(
-            client_id.to_string(),
-            DeviceEntry {
-                client_id: client_id.to_string(),
-                device_name: sanitize_commit_component(device_name),
-                last_synced_head: head.to_string(),
-                last_synced_at: isoish_now(),
-            },
-        );
+        let mut entry = registry.devices.remove(client_id).unwrap_or(DeviceEntry {
+            client_id: client_id.to_string(),
+            device_name: String::new(),
+            last_synced_head: String::new(),
+            last_synced_at: String::new(),
+            paths: HashMap::new(),
+        });
+        entry.device_name = sanitize_commit_component(device_name);
+        entry.last_synced_head = head.to_string();
+        entry.last_synced_at = isoish_now();
+        for touched_path in &touched.upserts {
+            entry.paths.insert(touched_path.clone(), head.to_string());
+        }
+        for touched_path in &touched.deletes {
+            entry.paths.remove(touched_path);
+        }
+        registry.devices.insert(client_id.to_string(), entry);
         write_devices(&path, &registry).await?;
         Ok(())
     }
@@ -475,7 +512,14 @@ impl VaultService {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         let registry = read_devices(&self.devices_path(&user, &vault)).await?;
-        Ok(registry.devices.into_values().collect())
+        Ok(registry
+            .devices
+            .into_values()
+            .map(|mut device| {
+                device.paths.clear();
+                device
+            })
+            .collect())
     }
 
     pub async fn device_versions(
@@ -967,8 +1011,14 @@ impl VaultService {
                         continue;
                     }
                     if is_text_or_code_path(&safe) {
-                        if let Some(conflict) =
-                            apply_text_delete(context.repo, context.base_head, &safe).await?
+                        let path_ack = context.device_paths.get(&safe).map(String::as_str);
+                        if let Some(conflict) = apply_text_delete(
+                            context.repo,
+                            context.base_head,
+                            path_ack,
+                            &safe,
+                        )
+                        .await?
                         {
                             conflicts.push(conflict);
                         }
@@ -1012,9 +1062,15 @@ impl VaultService {
                         )
                         .await?;
                     if is_text_or_code_path(&safe) {
-                        if let Some(conflict) =
-                            apply_text_upsert(context.repo, context.base_head, &safe, &content)
-                                .await?
+                        let path_ack = context.device_paths.get(&safe).map(String::as_str);
+                        if let Some(conflict) = apply_text_upsert(
+                            context.repo,
+                            context.base_head,
+                            path_ack,
+                            &safe,
+                            &content,
+                        )
+                        .await?
                         {
                             conflicts.push(conflict);
                         }
@@ -1627,14 +1683,19 @@ async fn read_upload_content(
 async fn apply_text_upsert(
     repo: &Path,
     base_head: Option<&str>,
+    path_ack: Option<&str>,
     path: &str,
     client_content: &[u8],
 ) -> Result<Option<SyncConflict>> {
     let absolute = repo_path(repo, path)?;
     let current = fs::read(&absolute).await.ok();
-    let base = match base_head {
-        Some(head) => read_file_at_commit(repo, head, path).await?,
-        None => None,
+    let base = if path_ack.is_some() {
+        match base_head {
+            Some(head) => read_file_at_commit(repo, head, path).await?,
+            None => None,
+        }
+    } else {
+        None
     };
 
     match (base, current) {
@@ -1686,6 +1747,7 @@ async fn apply_text_upsert(
 async fn apply_text_delete(
     repo: &Path,
     base_head: Option<&str>,
+    path_ack: Option<&str>,
     path: &str,
 ) -> Result<Option<SyncConflict>> {
     let absolute = repo_path(repo, path)?;
@@ -1693,9 +1755,13 @@ async fn apply_text_delete(
     let Some(current) = current else {
         return Ok(None);
     };
-    let base = match base_head {
-        Some(head) => read_file_at_commit(repo, head, path).await?,
-        None => None,
+    let base = if path_ack.is_some() {
+        match base_head {
+            Some(head) => read_file_at_commit(repo, head, path).await?,
+            None => None,
+        }
+    } else {
+        None
     };
     if base.as_ref() == Some(&current) || base.is_none() {
         let _ = fs::remove_file(absolute).await;
