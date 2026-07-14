@@ -1,5 +1,7 @@
 # ObsidiSync for Obsidian
 
+![ObsidiSync file history and sync status](./screenshot.png)
+
 This project contains:
 
 - An Obsidian plugin that runs on iOS, iPadOS, and macOS.
