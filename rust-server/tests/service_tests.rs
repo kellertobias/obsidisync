@@ -1260,7 +1260,12 @@ async fn brand_new_file_does_not_conflict_when_device_never_touched_the_path() {
         )
         .await
         .unwrap();
-    assert_eq!(recreated.status, SyncStatus::Ok, "{:?}", recreated.conflicts);
+    assert_eq!(
+        recreated.status,
+        SyncStatus::Ok,
+        "{:?}",
+        recreated.conflicts
+    );
 
     let clone = fixture.clone_remote("brand-new-check").await;
     assert_eq!(

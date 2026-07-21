@@ -1012,13 +1012,9 @@ impl VaultService {
                     }
                     if is_text_or_code_path(&safe) {
                         let path_ack = context.device_paths.get(&safe).map(String::as_str);
-                        if let Some(conflict) = apply_text_delete(
-                            context.repo,
-                            context.base_head,
-                            path_ack,
-                            &safe,
-                        )
-                        .await?
+                        if let Some(conflict) =
+                            apply_text_delete(context.repo, context.base_head, path_ack, &safe)
+                                .await?
                         {
                             conflicts.push(conflict);
                         }
