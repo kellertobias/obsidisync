@@ -23,13 +23,21 @@ The plugin also requires the ObsidiSync sync server. The iOS app does not run Gi
 
 ### 1. Deploy the sync server
 
-Build the container:
+Pull the prebuilt container from the GitHub Container Registry (published for every `vX.Y.Z` release, see [Release checklist](#release-checklist)):
 
 ```bash
-docker build -t obsidian-git-sync-server .
+docker pull ghcr.io/kellertobias/obsidisync:latest
 ```
 
-Run it with persistent storage:
+The image page is at [github.com/kellertobias/obsidisync/pkgs/container/obsidisync](https://github.com/kellertobias/obsidisync/pkgs/container/obsidisync). Pin a specific version with `ghcr.io/kellertobias/obsidisync:vX.Y.Z`.
+
+Or build the container yourself:
+
+```bash
+docker build -t ghcr.io/kellertobias/obsidisync .
+```
+
+Run it with persistent storage (swap the image name for `ghcr.io/kellertobias/obsidisync:latest` when using the prebuilt image):
 
 ```bash
 docker run --rm \
@@ -38,7 +46,7 @@ docker run --rm \
   -e OBSIDIAN_GIT_SYNC_PASSWORD_USER="alice" \
   -e OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN="replace-with-a-long-random-token" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
-  obsidian-git-sync-server
+  ghcr.io/kellertobias/obsidisync:latest
 ```
 
 Expose the server over HTTPS for real iOS use, usually through a reverse proxy. In the plugin settings, the sync server URL must point to this deployed server.
@@ -178,7 +186,18 @@ The Forgejo repository releases automatically: every push to `main` runs `semant
 
 To trigger a release, just merge Conventional Commit messages (`feat:`, `fix:`, etc.) into `main`. A commit type that doesn't map to a version bump (`chore:`, `docs:`, `refactor:`, ...) will not produce a release.
 
-The GitHub mirror release workflow (`.github/workflows/plugin-ci.yml`) is unaffected by this and still publishes a GitHub release whenever a `vX.Y.Z` tag is pushed there. It derives the release manifest version from the tag and uploads `main.js`, `manifest.json`, and `plugin.zip`, so BRAT installs from GitHub keep working from tags pushed to that remote.
+Semantic-release runs **only in Forgejo**, and only after the plugin build and Rust tests pass (the `release` job in `.forgejo/workflows/ci.yml` depends on `[plugin, rust-server]` and runs on `main`). GitHub receives a push mirror, so the `vX.Y.Z` tag semantic-release creates is mirrored to `github.com/kellertobias/obsidisync`.
+
+The Forgejo `release` job requires a repository secret named **`SEMANTIC_RELEASE_TOKEN`** — a Forgejo access token with `write:repository` scope. It is used both to check out the repo (so semantic-release can push the release commit and `vX.Y.Z` tag past branch/tag protection) and to create the Forgejo release via the API.
+
+The mirrored tag then drives the GitHub workflow (`.github/workflows/plugin-ci.yml`), which on any `vX.Y.Z` tag:
+
+1. Builds and tests the plugin, derives the manifest version from the tag, and publishes a GitHub release with `main.js`, `manifest.json`, and `plugin.zip` (so BRAT installs from GitHub keep working).
+2. Builds the sync-server Docker image from the `Dockerfile` and pushes it to the GitHub Container Registry as `ghcr.io/kellertobias/obsidisync:vX.Y.Z` and `:latest`.
+
+The GitHub release notes link the pushed container image and its [package page](https://github.com/kellertobias/obsidisync/pkgs/container/obsidisync). No changelog or version file is committed on the GitHub side; it consumes the tag produced by Forgejo.
+
+Because the GitHub Container Registry image is public, no `docker login` is needed to pull it. Pushing requires the workflow's built-in `GITHUB_TOKEN` with `packages: write`, which is already granted to the `docker` job — no extra secret is required.
 
 ## Run the Rust server
 
@@ -227,10 +246,10 @@ npm run start:server
 
 Use HTTPS in production, usually by placing the server behind a reverse proxy.
 
-Docker:
+Docker (prebuilt image from the GitHub Container Registry, or build locally with `docker build -t ghcr.io/kellertobias/obsidisync .`):
 
 ```bash
-docker build -t obsidian-git-sync-server .
+docker pull ghcr.io/kellertobias/obsidisync:latest
 docker run --rm \
   -p 8787:8787 \
   -v obsidian-git-sync-data:/data \
@@ -239,7 +258,7 @@ docker run --rm \
   -e OIDC_DEVICE_CLIENT_ID="obsidian-device" \
   -e OIDC_USER_CLAIM="preferred_username" \
   -e OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" \
-  obsidian-git-sync-server
+  ghcr.io/kellertobias/obsidisync:latest
 ```
 
 The container listens on `0.0.0.0:8787` and stores server state in `/data`.
