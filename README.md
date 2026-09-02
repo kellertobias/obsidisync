@@ -306,6 +306,28 @@ The plugin always registers vaults on the `main` branch and uses the persistent 
 
 The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error. The same response carries a `features` list; optional features such as device passwords are offered only when the server advertises them, and the plugin explains that the server needs an update otherwise.
 
+### Adding another device to a vault
+
+Every device that should carry the same vault talks to the same server and uses the same vault name. There are two kinds of devices:
+
+- **Obsidian devices** (macOS, iOS, iPadOS) run the plugin and take part in full two-way sync with conflict handling.
+- **WebDAV devices** (e-ink tablets, file managers, sync apps) get a device password for a single folder; see [Device passwords and WebDAV](#device-passwords-and-webdav-e-ink-tablets) below.
+
+To add an Obsidian device:
+
+1. Create an empty vault on the new device, or open the vault you want to connect. Its contents will be reconciled with the server in step 5.
+2. Install and enable ObsidiSync on that device, following [Installation overview](#installation-overview).
+3. In the plugin settings, enter the same sync server URL as on your other devices and click **Log in**. Password mode uses the password you set on the first device; the setup token is only needed once, on the very first login for a server.
+4. Set **Vault name** to the exact name used on your other devices (for example `personal`). This is what ties the devices to one server-side vault. Give the device a distinct **Computer name** so it is recognisable in file history and the per-device version indicators.
+5. Run **Sync now**. Because this is the device's first sync, the plugin asks how to reconcile:
+   - Choose **Overwrite local** to pull the existing vault from the server. This is the normal choice for a new device; the plugin backs up any local files first.
+   - Choose **Force push** only if this device holds the copy you want to keep and the server should be replaced. This destroys whatever is on the server.
+6. After the first sync completes, scheduled and on-startup syncs keep the device up to date. Check **Settings -> ObsidiSync -> Sync status** or the sync indicator on mobile.
+
+To remove an Obsidian device, disable or uninstall the plugin on it. Its last synced state stays recorded on the server as an inactive device; that is harmless.
+
+To add a WebDAV device, create a device password from any logged-in Obsidian device as described in the next section and enter the shown URL, username, and password on the device. To remove it, revoke the password in the same dialog.
+
 ### Device passwords and WebDAV (e-ink tablets)
 
 Other devices that cannot run the plugin, for example an e-ink tablet that exports its PDF notes to a WebDAV share, can sync into one folder of a vault through the server's built-in WebDAV endpoint. Access is granted per device with a **device password**:
