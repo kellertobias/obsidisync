@@ -215,6 +215,7 @@ export ZITADEL_BASE_URL="https://issuer.example.com" # optional; defaults to OID
 export OBSIDIAN_GIT_SYNC_DATA_DIR="/srv/obsidian-git-sync"
 export OBSIDIAN_GIT_SYNC_LISTEN="127.0.0.1:8787"
 export OBSIDIAN_GIT_SYNC_MAX_BODY_BYTES="52428800"
+export OBSIDIAN_GIT_SYNC_WEBDAV_MAX_BODY_BYTES="209715200" # largest single WebDAV upload (PDF notes)
 export OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS="github.com,gitlab.com,git.example.com" # required for network remotes
 export OBSIDIAN_GIT_SYNC_ALLOWED_ORIGINS="" # default: no browser CORS headers
 npm run start:server
@@ -267,6 +268,8 @@ Security defaults:
 
 - OIDC issuer/JWKS URLs must use HTTPS, except localhost development URLs.
 - Password mode stores the Argon2 password hash under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/password.json` and hashed server session tokens under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/sessions.json`.
+- WebDAV device passwords are generated server-side, stored only as SHA-256 hashes under `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/device-passwords.json`, and each grants access to a single vault folder. They are created and revoked with a normal plugin login and work in every auth mode.
+- Failed WebDAV logins are throttled: 20 failures from one client address (first `X-Forwarded-For` hop, otherwise the TCP peer) or 100 failures for one username within 15 minutes lock that key for 15 minutes with a `429` and `Retry-After` response. Successful logins clear the counter.
 - First-time password setup requires `OBSIDIAN_GIT_SYNC_PASSWORD_SETUP_TOKEN` or the generated setup token printed in server logs.
 - Plugin server/OIDC URLs must use HTTPS, except localhost development URLs.
 - Leaving the Git remote URL blank is allowed and selects server-local Git storage in `OBSIDIAN_GIT_SYNC_DATA_DIR`.
@@ -302,6 +305,27 @@ Advanced settings:
 The plugin always registers vaults on the `main` branch and uses the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`.
 
 The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error.
+
+### Device passwords and WebDAV (e-ink tablets)
+
+Other devices that cannot run the plugin, for example an e-ink tablet that exports its PDF notes to a WebDAV share, can sync into one folder of a vault through the server's built-in WebDAV endpoint. Access is granted per device with a **device password**:
+
+1. Log in with the plugin on any client and sync the vault at least once.
+2. Open **Settings -> ObsidiSync -> Device passwords (WebDAV) -> Manage** (or run the **Manage device passwords (WebDAV)** command).
+3. Enter a device name (shown in sync history) and the vault folder the device may use, for example `Tablet/Notes`, then click **Create password**.
+4. Copy the WebDAV URL, username, and generated password into the device's WebDAV settings. The password is shown only once.
+
+The WebDAV URL has the form:
+
+```text
+https://sync.example.com/dav/{vault}/{folder}/
+```
+
+The username is the ObsidiSync user namespace, and the password is the generated device password (five groups of four lowercase characters, easy to type on a tablet keyboard). Each password is bound to exactly one vault and folder: everything the device reads or writes must be inside that folder, parent folders are only browsable so clients can navigate down from the root, and every other path returns `403`. Revoke a device from the same dialog at any time; the device loses access immediately.
+
+Files uploaded over WebDAV are committed to the vault repository under the device name, so Obsidian clients receive them on their next sync and they appear in file history and the per-device version indicators like any other change. PDFs and other binary files go through the same binary object store as plugin uploads. Uploads are last-write-wins; the WebDAV side never has to resolve conflicts.
+
+The endpoint implements WebDAV class 1 (`OPTIONS`, `PROPFIND` with depth 0 or 1, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`) plus advisory `LOCK`/`UNLOCK` so class 2 clients such as macOS Finder or Windows Explorer work too. Downloads support single byte ranges (`Range: bytes=...`) for PDF viewers that read files in place. Uploads are streamed to disk, so large PDFs do not have to fit into server memory, and are limited by `OBSIDIAN_GIT_SYNC_WEBDAV_MAX_BODY_BYTES` (default 200 MB). If the server sits behind a reverse proxy, raise its request body limit for `/dav/` as well (for nginx, `client_max_body_size`; its default of 1 MB rejects most PDF uploads with `413`). Re-uploading an unchanged file is a no-op and does not create a new version.
 
 ### First sync
 
@@ -354,6 +378,7 @@ The plugin adds:
 - **Resolve current conflict file**
 - **Sync now**
 - **Log in to ObsidiSync**
+- **Manage device passwords (WebDAV)**
 
 The version modal lists commits for the active file, previews selected versions read-only, copies text versions, and can replace the current file with a selected version.
 
@@ -376,6 +401,7 @@ Back up the complete server data directory configured by `OBSIDIAN_GIT_SYNC_DATA
 - `data/users/{user}/vaults/{vault}/binary`
 - `data/users/{user}/vaults/{vault}/state.json`
 - `auth/password.json` when using password mode
+- `auth/device-passwords.json` when devices sync over WebDAV
 
 Recommended procedure:
 
@@ -419,6 +445,10 @@ Do not restore only the Git repository without the binary object store. Binary f
 - `GET /v1/users/{user}/vaults/{vault}/history?path=Note.md`
 - `GET /v1/users/{user}/vaults/{vault}/file?path=Note.md&hash=<commit>`
 - `POST /v1/users/{user}/vaults/{vault}/resolve`
+- `GET /v1/users/{user}/vaults/{vault}/device-passwords`
+- `POST /v1/users/{user}/vaults/{vault}/device-passwords`
+- `DELETE /v1/users/{user}/vaults/{vault}/device-passwords/{id}`
+- `/dav/{vault}/{folder}/...` WebDAV endpoint, HTTP Basic auth with a device password
 
 ## Limits
 

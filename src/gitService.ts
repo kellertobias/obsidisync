@@ -3,6 +3,9 @@ import { arrayBufferToBase64 } from "./base64";
 import { diffManifests } from "./manifest";
 import {
   ClientChange,
+  CreateDevicePasswordRequest,
+  CreatedDevicePassword,
+  DevicePasswordEntry,
   DeviceVersionEntry,
   HistoryEntry,
   RegisterRequest,
@@ -485,6 +488,22 @@ export class GitService {
     await this.resolveFile(path);
   }
 
+  async listDevicePasswords(): Promise<DevicePasswordEntry[]> {
+    this.requireConfigured();
+    return this.getJson<DevicePasswordEntry[]>(`${this.vaultPath()}/device-passwords`);
+  }
+
+  async createDevicePassword(label: string, folder: string): Promise<CreatedDevicePassword> {
+    this.requireConfigured();
+    const request: CreateDevicePasswordRequest = { label, folder };
+    return this.postJson<CreatedDevicePassword>(`${this.vaultPath()}/device-passwords`, request);
+  }
+
+  async revokeDevicePassword(id: string): Promise<void> {
+    this.requireConfigured();
+    await this.deleteJson<unknown>(`${this.vaultPath()}/device-passwords/${encodeURIComponent(id)}`);
+  }
+
   async beginOidcDeviceLogin(): Promise<OidcDeviceAuthorization> {
     const config = await this.serverOidcLoginConfig();
 
@@ -718,71 +737,35 @@ export class GitService {
   }
 
   private async postJson<T>(path: string, body: unknown): Promise<T> {
-    const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
-    await this.refreshExpiringOidcAccessToken();
-    let response = await requestUrl({
-      url: `${serverUrl}${path}`,
-      method: "POST",
-      contentType: "application/json",
-      headers: {
-        Authorization: `Bearer ${this.settings.oidcAccessToken}`
-      },
-      body: JSON.stringify(body),
-      throw: false
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      if (await this.refreshOidcAccessToken()) {
-        response = await requestUrl({
-          url: `${serverUrl}${path}`,
-          method: "POST",
-          contentType: "application/json",
-          headers: {
-            Authorization: `Bearer ${this.settings.oidcAccessToken}`
-          },
-          body: JSON.stringify(body),
-          throw: false
-        });
-        if (response.status >= 200 && response.status < 300) {
-          return response.json as T;
-        }
-      }
-      if (!this.settings.lastLoginError) {
-        await this.recordLoginFailure("Login expired or unauthorized. Log in to ObsidiSync again.");
-      }
-      throw new Error("Login expired or unauthorized. Log in to ObsidiSync again.");
-    }
-
-    if (response.status < 200 || response.status >= 300) {
-      const text = response.text || `HTTP ${response.status}`;
-      throw new Error(text);
-    }
-
-    return response.json as T;
+    return this.requestJson<T>("POST", path, body);
   }
 
   private async getJson<T>(path: string): Promise<T> {
+    return this.requestJson<T>("GET", path);
+  }
+
+  private async deleteJson<T>(path: string): Promise<T> {
+    return this.requestJson<T>("DELETE", path);
+  }
+
+  private async requestJson<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
     await this.refreshExpiringOidcAccessToken();
-    let response = await requestUrl({
-      url: `${serverUrl}${path}`,
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${this.settings.oidcAccessToken}`
-      },
-      throw: false
-    });
+    const send = () =>
+      requestUrl({
+        url: `${serverUrl}${path}`,
+        method,
+        ...(body === undefined ? {} : { contentType: "application/json", body: JSON.stringify(body) }),
+        headers: {
+          Authorization: `Bearer ${this.settings.oidcAccessToken}`
+        },
+        throw: false
+      });
 
+    let response = await send();
     if (response.status === 401 || response.status === 403) {
       if (await this.refreshOidcAccessToken()) {
-        response = await requestUrl({
-          url: `${serverUrl}${path}`,
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${this.settings.oidcAccessToken}`
-          },
-          throw: false
-        });
+        response = await send();
         if (response.status >= 200 && response.status < 300) {
           return response.json as T;
         }
@@ -794,8 +777,7 @@ export class GitService {
     }
 
     if (response.status < 200 || response.status >= 300) {
-      const text = response.text || `HTTP ${response.status}`;
-      throw new Error(text);
+      throw new Error(serverErrorMessage(response.text, response.status));
     }
 
     return response.json as T;
@@ -923,6 +905,19 @@ export class GitService {
       listener(status);
     }
   }
+}
+
+function serverErrorMessage(text: string | undefined, status: number): string {
+  if (text) {
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown };
+      if (typeof parsed.error === "string" && parsed.error) return parsed.error;
+    } catch {
+      // Not JSON; fall through to the raw text.
+    }
+    return text;
+  }
+  return `HTTP ${status}`;
 }
 
 function sleep(ms: number): Promise<void> {

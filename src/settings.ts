@@ -166,6 +166,17 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
         })
       );
 
+    containerEl.createEl("h3", { text: "Device access" });
+
+    new Setting(containerEl)
+      .setName("Device passwords (WebDAV)")
+      .setDesc("Let an e-ink tablet or another WebDAV client sync files into one folder of this vault. Each device gets its own revocable password.")
+      .addButton((button) =>
+        button.setButtonText("Manage").onClick(() => {
+          this.plugin.openDevicePasswordsModal();
+        })
+      );
+
     containerEl.createEl("h3", { text: "Sync" });
 
     new Setting(containerEl)

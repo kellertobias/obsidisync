@@ -83,14 +83,14 @@ fn protocol_matches_plugin_json_field_names() {
 async fn server_info_reports_api_compatibility() {
     let root = tempfile::tempdir().unwrap();
     let app = router(
-        AppState {
-            vaults: VaultService::new(root.path().join("data")),
-            auth: AuthVerifier::StaticTokenForDev {
+        AppState::new(
+            VaultService::new(root.path().join("data")),
+            AuthVerifier::StaticTokenForDev {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
-            public_auth: PublicAuthConfig::Token,
-        },
+            PublicAuthConfig::Token,
+        ),
         1024 * 1024,
         Vec::new(),
     );
@@ -118,14 +118,14 @@ async fn server_info_reports_api_compatibility() {
 async fn http_authorization_rejects_cross_user_access() {
     let root = tempfile::tempdir().unwrap();
     let app = router(
-        AppState {
-            vaults: VaultService::new(root.path().join("data")),
-            auth: AuthVerifier::StaticTokenForDev {
+        AppState::new(
+            VaultService::new(root.path().join("data")),
+            AuthVerifier::StaticTokenForDev {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
-            public_auth: PublicAuthConfig::Token,
-        },
+            PublicAuthConfig::Token,
+        ),
         1024 * 1024,
         Vec::new(),
     );
@@ -168,11 +168,11 @@ async fn password_auth_page_setup_login_and_authorizes_api_requests() {
     let root = tempfile::tempdir().unwrap();
     let data_dir = root.path().join("data");
     let app = router(
-        AppState {
-            vaults: VaultService::new(data_dir.clone()),
-            auth: AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
-            public_auth: PublicAuthConfig::Password,
-        },
+        AppState::new(
+            VaultService::new(data_dir.clone()),
+            AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
+            PublicAuthConfig::Password,
+        ),
         1024 * 1024,
         Vec::new(),
     );
@@ -525,16 +525,16 @@ async fn password_setup_requires_bootstrap_token_when_configured() {
     let root = tempfile::tempdir().unwrap();
     let data_dir = root.path().join("data");
     let app = router(
-        AppState {
-            vaults: VaultService::new(data_dir.clone()),
-            auth: AuthVerifier::password_with_setup_token(
+        AppState::new(
+            VaultService::new(data_dir.clone()),
+            AuthVerifier::password_with_setup_token(
                 "Alice@example.com".to_string(),
                 data_dir,
                 Some("setup-token-123456".to_string()),
             )
             .unwrap(),
-            public_auth: PublicAuthConfig::Password,
-        },
+            PublicAuthConfig::Password,
+        ),
         1024 * 1024,
         Vec::new(),
     );
@@ -633,11 +633,11 @@ async fn password_endpoints_are_disabled_outside_password_mode() {
     let root = tempfile::tempdir().unwrap();
     let data_dir = root.path().join("data");
     let app = router(
-        AppState {
-            vaults: VaultService::new(data_dir.clone()),
-            auth: AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
-            public_auth: PublicAuthConfig::Token,
-        },
+        AppState::new(
+            VaultService::new(data_dir.clone()),
+            AuthVerifier::password("Alice@example.com".to_string(), data_dir).unwrap(),
+            PublicAuthConfig::Token,
+        ),
         1024 * 1024,
         Vec::new(),
     );
@@ -686,14 +686,14 @@ async fn password_endpoints_are_disabled_outside_password_mode() {
 async fn http_rejects_oversized_sync_bodies() {
     let root = tempfile::tempdir().unwrap();
     let app = router(
-        AppState {
-            vaults: VaultService::new(root.path().join("data")),
-            auth: AuthVerifier::StaticTokenForDev {
+        AppState::new(
+            VaultService::new(root.path().join("data")),
+            AuthVerifier::StaticTokenForDev {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
-            public_auth: PublicAuthConfig::Token,
-        },
+            PublicAuthConfig::Token,
+        ),
         128,
         Vec::new(),
     );
@@ -717,14 +717,14 @@ async fn http_rejects_oversized_sync_bodies() {
 async fn http_does_not_allow_cross_origin_by_default() {
     let root = tempfile::tempdir().unwrap();
     let app = router(
-        AppState {
-            vaults: VaultService::new(root.path().join("data")),
-            auth: AuthVerifier::StaticTokenForDev {
+        AppState::new(
+            VaultService::new(root.path().join("data")),
+            AuthVerifier::StaticTokenForDev {
                 token: "secret".to_string(),
                 user: "alice".to_string(),
             },
-            public_auth: PublicAuthConfig::Token,
-        },
+            PublicAuthConfig::Token,
+        ),
         1024 * 1024,
         Vec::new(),
     );

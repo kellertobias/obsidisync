@@ -2,6 +2,7 @@ import { MarkdownView, Menu, Notice, Platform, Plugin } from "obsidian";
 import { AuthLoginModal } from "./authLoginModal";
 import { ComputerNameModal } from "./computerNameModal";
 import { ConflictResolverModal } from "./conflictResolverModal";
+import { DevicePasswordsModal } from "./devicePasswordsModal";
 import { FILE_HISTORY_VIEW_TYPE, FileHistoryView, HistorySnapshotReference } from "./fileHistoryView";
 import { GitService, LoginStatus } from "./gitService";
 import { InitialSyncModal } from "./initialSyncModal";
@@ -96,6 +97,12 @@ export default class ObsidiSyncPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "manage-device-passwords",
+      name: "Manage device passwords (WebDAV)",
+      callback: () => this.openDevicePasswordsModal()
+    });
+
+    this.addCommand({
       id: "oidc-device-login",
       name: "Start OIDC device login",
       callback: () => new OidcDeviceLoginModal(this.app, this.gitService).open()
@@ -160,6 +167,10 @@ export default class ObsidiSyncPlugin extends Plugin {
     new AuthLoginModal(this.app, this.gitService, async () => {
       await this.saveSettings();
     }).open();
+  }
+
+  openDevicePasswordsModal(): void {
+    new DevicePasswordsModal(this.app, this.gitService, this.settings.serverUrl).open();
   }
 
   onLoginStatusChange(listener: (status: LoginStatus) => void): () => void {

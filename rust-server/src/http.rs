@@ -1,10 +1,14 @@
 use crate::auth::AuthVerifier;
+use crate::auth_throttle::AuthThrottle;
+use crate::device_passwords::{
+    CreateDevicePasswordRequest, CreatedDevicePassword, DevicePasswordEntry, DevicePasswordStore,
+};
 use crate::protocol::*;
 use crate::vault::VaultService;
 use axum::extract::{DefaultBodyLimit, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -14,12 +18,32 @@ const SITE_SESSION_COOKIE: &str = "obsidisync_session";
 const SITE_SESSION_COOKIE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
+/// PDFs exported from note-taking tablets are routinely larger than the JSON sync payload limit.
+pub const DEFAULT_WEBDAV_MAX_BODY_BYTES: usize = 200 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct AppState {
     pub vaults: VaultService,
     pub auth: AuthVerifier,
     pub public_auth: PublicAuthConfig,
+    pub device_passwords: Arc<DevicePasswordStore>,
+    pub webdav_throttle: Arc<AuthThrottle>,
+    /// Largest single WebDAV upload. Enforced while streaming the body to disk.
+    pub webdav_max_body_bytes: usize,
+}
+
+impl AppState {
+    pub fn new(vaults: VaultService, auth: AuthVerifier, public_auth: PublicAuthConfig) -> Self {
+        let device_passwords = Arc::new(DevicePasswordStore::new(vaults.data_dir.clone()));
+        Self {
+            vaults,
+            auth,
+            public_auth,
+            device_passwords,
+            webdav_throttle: Arc::new(AuthThrottle::new()),
+            webdav_max_body_bytes: DEFAULT_WEBDAV_MAX_BODY_BYTES,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -117,6 +141,27 @@ impl IntoResponse for ApiError {
 }
 
 pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<String>) -> Router {
+    router_with_webdav_limit(
+        state,
+        max_body_bytes,
+        max_body_bytes.max(DEFAULT_WEBDAV_MAX_BODY_BYTES),
+        allowed_origins,
+    )
+}
+
+pub fn router_with_webdav_limit(
+    mut state: AppState,
+    max_body_bytes: usize,
+    webdav_max_body_bytes: usize,
+    allowed_origins: Vec<String>,
+) -> Router {
+    state.webdav_max_body_bytes = webdav_max_body_bytes;
+    // WebDAV reads the raw request body itself (streamed to disk), so its size limit is
+    // enforced in the handler rather than through `DefaultBodyLimit`.
+    let webdav = Router::new()
+        .route("/dav", any(crate::webdav::handle))
+        .route("/dav/", any(crate::webdav::handle))
+        .route("/dav/*path", any(crate::webdav::handle));
     let router = Router::new()
         .route("/", get(home_page))
         .route("/login", get(password_page).post(password_form))
@@ -156,7 +201,16 @@ pub fn router(state: AppState, max_body_bytes: usize, allowed_origins: Vec<Strin
             "/v1/users/:user/vaults/:vault/files/version-metadata",
             post(set_version_metadata),
         )
+        .route(
+            "/v1/users/:user/vaults/:vault/device-passwords",
+            get(list_device_passwords).post(create_device_password),
+        )
+        .route(
+            "/v1/users/:user/vaults/:vault/device-passwords/:id",
+            delete(revoke_device_password),
+        )
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        .merge(webdav)
         .with_state(Arc::new(state));
 
     apply_cors(router, allowed_origins)
@@ -219,6 +273,9 @@ fn is_public_client_error(message: &str) -> bool {
         || message.starts_with("password setup token is required")
         || message.starts_with("password is already set")
         || message.starts_with("password confirmation")
+        || message.starts_with("invalid device password")
+        || message.starts_with("invalid request")
+        || message.starts_with("invalid vault")
 }
 
 #[derive(Debug, Deserialize)]
@@ -808,6 +865,47 @@ async fn set_version_metadata(
 struct FileQuery {
     path: String,
     hash: String,
+}
+
+async fn list_device_passwords(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+) -> Result<Json<Vec<DevicePasswordEntry>>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(state.device_passwords.list(&user, &vault).await?))
+}
+
+async fn create_device_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Json(request): Json<CreateDevicePasswordRequest>,
+) -> Result<Json<CreatedDevicePassword>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    if !state.vaults.is_registered(&user, &vault).await {
+        return Err(ApiError(anyhow::anyhow!(
+            "invalid vault: sync this vault from Obsidian once before creating device passwords"
+        )));
+    }
+    Ok(Json(
+        state
+            .device_passwords
+            .create(&user, &vault, request)
+            .await?,
+    ))
+}
+
+async fn revoke_device_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault, id)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    if !state.device_passwords.revoke(&user, &vault, &id).await? {
+        return Err(ApiError(anyhow::anyhow!("not found: device password")));
+    }
+    Ok(Json(serde_json::json!({ "revoked": true })))
 }
 
 async fn authorize(

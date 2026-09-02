@@ -25,6 +25,8 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+pub mod dav;
+
 const UPLOAD_CHUNK_SIZE_BYTES: u64 = 512 * 1024;
 const PENDING_CONFLICTS_PATH: &str = "pending-conflicts.json";
 const PENDING_CONFLICT_REASON: &str = "file is already awaiting conflict resolution";

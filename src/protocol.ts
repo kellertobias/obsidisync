@@ -151,3 +151,23 @@ export interface ServerInfoResponse {
   apiVersion: number;
   minClientApiVersion: number;
 }
+
+export interface DevicePasswordEntry {
+  id: string;
+  label: string;
+  vault: string;
+  folder: string;
+  username: string;
+  webdavPath: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface CreateDevicePasswordRequest {
+  label: string;
+  folder: string;
+}
+
+export interface CreatedDevicePassword extends DevicePasswordEntry {
+  password: string;
+}

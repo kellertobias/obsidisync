@@ -2,7 +2,9 @@ use anyhow::{bail, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use obsidian_git_sync_server::auth::{AuthVerifier, ZitadelAuthorization};
-use obsidian_git_sync_server::http::{router, AppState, PublicAuthConfig};
+use obsidian_git_sync_server::http::{
+    router_with_webdav_limit, AppState, PublicAuthConfig, DEFAULT_WEBDAV_MAX_BODY_BYTES,
+};
 use obsidian_git_sync_server::remote::RemotePolicy;
 use obsidian_git_sync_server::vault::{VaultService, VaultServiceOptions};
 use std::net::SocketAddr;
@@ -19,18 +21,19 @@ async fn main() -> Result<()> {
         data_dir: config.data_dir,
         remote_policy: config.remote_policy,
     });
-    let app = router(
-        AppState {
-            vaults,
-            auth: config.auth,
-            public_auth: config.public_auth,
-        },
+    let app = router_with_webdav_limit(
+        AppState::new(vaults, config.auth, config.public_auth),
         config.max_body_bytes,
+        config.webdav_max_body_bytes,
         config.allowed_origins,
     );
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!("obsidian git sync server listening on {}", config.listen);
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -40,6 +43,7 @@ struct RuntimeConfig {
     auth: AuthVerifier,
     public_auth: PublicAuthConfig,
     max_body_bytes: usize,
+    webdav_max_body_bytes: usize,
     remote_policy: RemotePolicy,
     allowed_origins: Vec<String>,
 }
@@ -118,6 +122,9 @@ impl RuntimeConfig {
         let max_body_bytes = std::env::var("OBSIDIAN_GIT_SYNC_MAX_BODY_BYTES")
             .unwrap_or_else(|_| (50 * 1024 * 1024).to_string())
             .parse::<usize>()?;
+        let webdav_max_body_bytes = std::env::var("OBSIDIAN_GIT_SYNC_WEBDAV_MAX_BODY_BYTES")
+            .unwrap_or_else(|_| DEFAULT_WEBDAV_MAX_BODY_BYTES.to_string())
+            .parse::<usize>()?;
         let remote_policy = RemotePolicy {
             allow_local_remotes: parse_bool_env("OBSIDIAN_GIT_SYNC_ALLOW_LOCAL_REMOTES"),
             allowed_hosts: parse_csv_env("OBSIDIAN_GIT_SYNC_ALLOWED_REMOTE_HOSTS"),
@@ -130,6 +137,7 @@ impl RuntimeConfig {
             auth,
             public_auth,
             max_body_bytes,
+            webdav_max_body_bytes,
             remote_policy,
             allowed_origins,
         })
