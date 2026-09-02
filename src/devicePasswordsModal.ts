@@ -39,6 +39,19 @@ export class DevicePasswordsModal extends Modal {
       return;
     }
 
+    const checking = contentEl.createEl("p", { text: "Checking the sync server..." });
+    try {
+      const unavailable = await this.gitService.devicePasswordsUnavailableReason();
+      if (unavailable) {
+        checking.setText(unavailable);
+        return;
+      }
+    } catch (error) {
+      checking.setText(`Could not reach the sync server: ${errorMessage(error)}`);
+      return;
+    }
+    checking.remove();
+
     this.createdEl = contentEl.createDiv();
 
     contentEl.createEl("h3", { text: "New device password" });

@@ -24,6 +24,7 @@ import {
   VersionFileResponse,
   VersionMetadataRequest
 } from "./protocol";
+import { devicePasswordsAvailabilityMessage } from "./devicePasswords";
 import { getDeviceName } from "./runtime";
 import { IosGitSyncSettings } from "./settings";
 import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./security";
@@ -488,20 +489,45 @@ export class GitService {
     await this.resolveFile(path);
   }
 
+  /**
+   * Re-checks the server and returns why device passwords are unavailable, or `null` if they work.
+   * Servers without feature flags never advertise the feature, so old servers are reported as such.
+   */
+  async devicePasswordsUnavailableReason(): Promise<string | null> {
+    this.requireConfigured();
+    await this.checkServerCompatibility();
+    return devicePasswordsAvailabilityMessage(this.settings);
+  }
+
   async listDevicePasswords(): Promise<DevicePasswordEntry[]> {
     this.requireConfigured();
-    return this.getJson<DevicePasswordEntry[]>(`${this.vaultPath()}/device-passwords`);
+    return this.devicePasswordRequest(() => this.getJson<DevicePasswordEntry[]>(`${this.vaultPath()}/device-passwords`));
   }
 
   async createDevicePassword(label: string, folder: string): Promise<CreatedDevicePassword> {
     this.requireConfigured();
     const request: CreateDevicePasswordRequest = { label, folder };
-    return this.postJson<CreatedDevicePassword>(`${this.vaultPath()}/device-passwords`, request);
+    return this.devicePasswordRequest(() => this.postJson<CreatedDevicePassword>(`${this.vaultPath()}/device-passwords`, request));
   }
 
   async revokeDevicePassword(id: string): Promise<void> {
     this.requireConfigured();
-    await this.deleteJson<unknown>(`${this.vaultPath()}/device-passwords/${encodeURIComponent(id)}`);
+    await this.devicePasswordRequest(() => this.deleteJson<unknown>(`${this.vaultPath()}/device-passwords/${encodeURIComponent(id)}`));
+  }
+
+  /** An old server has no device-password routes at all and answers 404; say so instead of "not found". */
+  private async devicePasswordRequest<T>(request: () => Promise<T>): Promise<T> {
+    try {
+      return await request();
+    } catch (error) {
+      if (error instanceof HttpStatusError && error.status === 404 && !this.settings.serverFeatures.includes("webdavDevicePasswords")) {
+        throw new Error(
+          devicePasswordsAvailabilityMessage({ ...this.settings, lastServerCheckAt: this.settings.lastServerCheckAt ?? new Date().toISOString() }) ??
+            "The sync server does not support device passwords yet. Update the server."
+        );
+      }
+      throw error;
+    }
   }
 
   async beginOidcDeviceLogin(): Promise<OidcDeviceAuthorization> {
@@ -617,6 +643,7 @@ export class GitService {
 
     this.settings.serverVersion = info.version;
     this.settings.serverApiVersion = info.apiVersion;
+    this.settings.serverFeatures = Array.isArray(info.features) ? info.features.filter((feature) => typeof feature === "string") : [];
     this.settings.lastServerCheckAt = new Date().toISOString();
     await this.saveSettings();
     return info;
@@ -777,7 +804,7 @@ export class GitService {
     }
 
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(serverErrorMessage(response.text, response.status));
+      throw new HttpStatusError(response.status, serverErrorMessage(response.text, response.status));
     }
 
     return response.json as T;
@@ -904,6 +931,16 @@ export class GitService {
     for (const listener of this.loginStatusListeners) {
       listener(status);
     }
+  }
+}
+
+export class HttpStatusError extends Error {
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "HttpStatusError";
   }
 }
 

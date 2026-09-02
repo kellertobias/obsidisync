@@ -150,6 +150,8 @@ export interface ServerInfoResponse {
   version: string;
   apiVersion: number;
   minClientApiVersion: number;
+  /** Optional capabilities; absent on servers that predate feature flags. */
+  features?: string[];
 }
 
 export interface DevicePasswordEntry {

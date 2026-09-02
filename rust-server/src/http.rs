@@ -18,6 +18,9 @@ const SITE_SESSION_COOKIE: &str = "obsidisync_session";
 const SITE_SESSION_COOKIE_MAX_AGE_SECONDS: u64 = 30 * 24 * 60 * 60;
 const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
+/// Optional capabilities advertised to clients. Older plugins ignore the list; newer plugins
+/// hide or explain features that the server they talk to does not have yet.
+const SERVER_FEATURES: &[&str] = &["webdavDevicePasswords"];
 /// PDFs exported from note-taking tablets are routinely larger than the JSON sync payload limit.
 pub const DEFAULT_WEBDAV_MAX_BODY_BYTES: usize = 200 * 1024 * 1024;
 
@@ -99,6 +102,7 @@ struct ServerInfoResponse {
     version: &'static str,
     api_version: u32,
     min_client_api_version: u32,
+    features: &'static [&'static str],
 }
 
 impl<E> From<E> for ApiError
@@ -226,6 +230,7 @@ async fn server_info() -> Json<ServerInfoResponse> {
         version: env!("CARGO_PKG_VERSION"),
         api_version: SERVER_API_VERSION,
         min_client_api_version: MIN_CLIENT_API_VERSION,
+        features: SERVER_FEATURES,
     })
 }
 

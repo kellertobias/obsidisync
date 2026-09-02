@@ -304,7 +304,7 @@ Advanced settings:
 
 The plugin always registers vaults on the `main` branch and uses the persistent server-local repository at `data/users/{user}/vaults/{vault}/repo`.
 
-The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error.
+The plugin checks `/v1/server/info` before authenticated server operations and records the server version/API version in settings. If the server reports an incompatible API version, the plugin stops before syncing and shows a compatibility error. The same response carries a `features` list; optional features such as device passwords are offered only when the server advertises them, and the plugin explains that the server needs an update otherwise.
 
 ### Device passwords and WebDAV (e-ink tablets)
 

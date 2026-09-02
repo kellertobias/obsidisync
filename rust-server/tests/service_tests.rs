@@ -111,6 +111,11 @@ async fn server_info_reports_api_compatibility() {
     assert_eq!(body["name"], "obsidisync-server");
     assert_eq!(body["apiVersion"], 1);
     assert_eq!(body["minClientApiVersion"], 1);
+    assert!(body["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "webdavDevicePasswords"));
     assert!(body["version"].as_str().is_some());
 }
 

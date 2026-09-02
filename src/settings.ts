@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import ObsidiSyncPlugin from "./main";
+import { devicePasswordsAvailabilityMessage } from "./devicePasswords";
 import { ManifestEntry } from "./protocol";
 
 export interface IosGitSyncSettings {
@@ -33,6 +34,7 @@ export interface IosGitSyncSettings {
   syncStatus: "idle" | "running" | "queued" | "error";
   serverVersion: string | null;
   serverApiVersion: number | null;
+  serverFeatures: string[];
   lastServerCheckAt: string | null;
   localManifest: ManifestEntry[];
   historySnapshots: HistorySnapshotEntry[];
@@ -83,6 +85,7 @@ export const DEFAULT_SETTINGS: IosGitSyncSettings = {
   syncStatus: "idle",
   serverVersion: null,
   serverApiVersion: null,
+  serverFeatures: [],
   lastServerCheckAt: null,
   localManifest: [],
   historySnapshots: [],
@@ -170,7 +173,10 @@ export class IosGitSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Device passwords (WebDAV)")
-      .setDesc("Let an e-ink tablet or another WebDAV client sync files into one folder of this vault. Each device gets its own revocable password.")
+      .setDesc(
+        devicePasswordsAvailabilityMessage(this.plugin.settings) ??
+          "Let an e-ink tablet or another WebDAV client sync files into one folder of this vault. Each device gets its own revocable password."
+      )
       .addButton((button) =>
         button.setButtonText("Manage").onClick(() => {
           this.plugin.openDevicePasswordsModal();

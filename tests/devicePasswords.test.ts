@@ -2,7 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describeDevicePassword, normalizeDeviceFolder, webdavUrl } from "../src/devicePasswords";
+import {
+  describeDevicePassword,
+  devicePasswordsAvailabilityMessage,
+  normalizeDeviceFolder,
+  serverSupportsDevicePasswords,
+  webdavUrl
+} from "../src/devicePasswords";
 
 const root = process.cwd();
 
@@ -54,4 +60,29 @@ test("device passwords are managed from settings and shown once after creation",
   const service = readFileSync(join(root, "src", "gitService.ts"), "utf8");
   assert.match(service, /async createDevicePassword\(label: string, folder: string\): Promise<CreatedDevicePassword>/);
   assert.match(service, /device-passwords\/\$\{encodeURIComponent\(id\)\}/);
+});
+
+test("device passwords are only offered when the server advertises the feature", () => {
+  assert.equal(serverSupportsDevicePasswords({ features: ["webdavDevicePasswords"] }), true);
+  assert.equal(serverSupportsDevicePasswords({ features: [] }), false);
+  assert.equal(serverSupportsDevicePasswords({}), false);
+
+  // Unknown until the first server check: do not claim it is missing.
+  assert.equal(devicePasswordsAvailabilityMessage({ lastServerCheckAt: null, serverVersion: null, serverFeatures: [] }), null);
+  assert.equal(
+    devicePasswordsAvailabilityMessage({ lastServerCheckAt: "2026-09-02T10:00:00Z", serverVersion: "0.5.0", serverFeatures: ["webdavDevicePasswords"] }),
+    null
+  );
+  const message = devicePasswordsAvailabilityMessage({ lastServerCheckAt: "2026-09-02T10:00:00Z", serverVersion: "0.4.0", serverFeatures: [] });
+  assert.match(message ?? "", /too old for device passwords/);
+  assert.match(message ?? "", /version 0\.4\.0/);
+});
+
+test("the modal checks server support before offering device passwords", () => {
+  const modal = readFileSync(join(root, "src", "devicePasswordsModal.ts"), "utf8");
+  assert.match(modal, /await this\.gitService\.devicePasswordsUnavailableReason\(\)/);
+
+  const service = readFileSync(join(root, "src", "gitService.ts"), "utf8");
+  assert.match(service, /this\.settings\.serverFeatures = Array\.isArray\(info\.features\)/);
+  assert.match(service, /error\.status === 404 && !this\.settings\.serverFeatures\.includes\("webdavDevicePasswords"\)/);
 });

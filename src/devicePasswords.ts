@@ -1,8 +1,28 @@
-import { DevicePasswordEntry } from "./protocol";
+import { DevicePasswordEntry, ServerInfoResponse } from "./protocol";
 import { shouldIgnoreVaultPath } from "./ignore";
 import { assertSafeVaultPath } from "./security";
 
 export const DEFAULT_DEVICE_FOLDER = "Tablet";
+export const DEVICE_PASSWORDS_FEATURE = "webdavDevicePasswords";
+
+export function serverSupportsDevicePasswords(info: Pick<ServerInfoResponse, "features">): boolean {
+  return Array.isArray(info.features) && info.features.includes(DEVICE_PASSWORDS_FEATURE);
+}
+
+/**
+ * Explains why device passwords cannot be used yet, or `null` when they can.
+ * Before the first server check nothing is known, so the feature is offered normally.
+ */
+export function devicePasswordsAvailabilityMessage(settings: {
+  lastServerCheckAt: string | null;
+  serverVersion: string | null;
+  serverFeatures: string[];
+}): string | null {
+  if (!settings.lastServerCheckAt) return null;
+  if (serverSupportsDevicePasswords({ features: settings.serverFeatures })) return null;
+  const version = settings.serverVersion ? ` (it reports version ${settings.serverVersion})` : "";
+  return `Not available: the sync server${version} is too old for device passwords. Update the server, then check the connection again.`;
+}
 
 /**
  * Turns user input into the vault-relative folder a device password grants access to.
