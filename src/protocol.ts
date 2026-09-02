@@ -21,12 +21,21 @@ export type ClientChange =
       op: "delete";
     };
 
+/**
+ * "inline" embeds every file as base64 in the sync response (the historical behaviour).
+ * "reference" returns only path, hash, and size; the client fetches each file from the blob
+ * endpoint, which keeps peak memory at one file instead of the whole vault.
+ */
+export type FileContentMode = "inline" | "reference";
+
 export type ServerFileChange =
   | {
       path: string;
       op: "upsert";
-      contentBase64: string;
+      /** Absent when the request used fileContent "reference". */
+      contentBase64?: string;
       sha256: string;
+      size?: number;
     }
   | {
       path: string;
@@ -53,6 +62,7 @@ export interface SyncRequest {
   deviceName: string;
   changes: ClientChange[];
   clientManifest: ManifestEntry[];
+  fileContent?: FileContentMode;
 }
 
 export interface SyncConflict {
@@ -102,6 +112,7 @@ export interface ResolveRequest {
     contentBase64?: string;
     uploadId?: string;
   }>;
+  fileContent?: FileContentMode;
 }
 
 export interface HistoryEntry {

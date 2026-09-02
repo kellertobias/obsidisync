@@ -372,6 +372,7 @@ impl VaultService {
                     &binary_root,
                     base_head.as_deref(),
                     &request.client_manifest,
+                    request.file_content.is_inline(),
                 )
                 .await?;
 
@@ -788,6 +789,27 @@ impl VaultService {
         file_path: &str,
         hash: &str,
     ) -> Result<VersionFileResponse> {
+        let (safe_path, content) = self
+            .file_bytes_at_version(user, vault, file_path, hash)
+            .await?;
+        Ok(VersionFileResponse {
+            path: safe_path,
+            hash: validate_commit_id(hash)?,
+            sha256: sha256_hex(&content),
+            content_base64: STANDARD.encode(&content),
+            read_only: true,
+        })
+    }
+
+    /// Raw bytes of one file as committed at `hash`. Used by the blob endpoint so clients can
+    /// download large files one at a time without base64 or JSON overhead.
+    pub async fn file_bytes_at_version(
+        &self,
+        user: &str,
+        vault: &str,
+        file_path: &str,
+        hash: &str,
+    ) -> Result<(String, Vec<u8>)> {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         let safe_path = validate_vault_path(file_path)?;
@@ -812,13 +834,7 @@ impl VaultService {
                 .ok_or_else(|| anyhow!("binary file not present at requested version"))?;
             read_binary_object(&self.binary_dir(&user, &vault), entry).await?
         };
-        Ok(VersionFileResponse {
-            path: safe_path,
-            hash: hash.to_string(),
-            sha256: sha256_hex(&content),
-            content_base64: STANDARD.encode(&content),
-            read_only: true,
-        })
+        Ok((safe_path, content))
     }
 
     pub async fn resolve(
@@ -835,6 +851,7 @@ impl VaultService {
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
             let upload_root = self.upload_dir(&user, &vault);
+            let inline = request.file_content.is_inline();
             let mut resolved_paths = Vec::new();
             for file in request.files {
                 let safe = validate_vault_path(&file.path)?;
@@ -885,7 +902,7 @@ impl VaultService {
                 status: SyncStatus::Ok,
                 server_head: self.head_from_repo(&repo).await?,
                 files: self
-                    .changed_files_since(&repo, &binary_root, None, &[])
+                    .changed_files_since(&repo, &binary_root, None, &[], inline)
                     .await?,
                 conflicts: vec![],
             })
@@ -1104,6 +1121,7 @@ impl VaultService {
         binary_root: &Path,
         base_head: Option<&str>,
         client_manifest: &[ManifestEntry],
+        inline: bool,
     ) -> Result<Vec<ServerFileChange>> {
         let mut files = Vec::new();
         let client_manifest_by_path: HashMap<&str, &ManifestEntry> = client_manifest
@@ -1153,7 +1171,8 @@ impl VaultService {
                     files.push(ServerFileChange::Upsert {
                         path,
                         sha256,
-                        content_base64: STANDARD.encode(content),
+                        size: Some(content.len() as u64),
+                        content_base64: inline.then(|| STANDARD.encode(content)),
                     })
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1183,11 +1202,16 @@ impl VaultService {
                 {
                     continue;
                 }
-                let content = read_binary_object(binary_root, entry).await?;
+                let content_base64 = if inline {
+                    Some(STANDARD.encode(read_binary_object(binary_root, entry).await?))
+                } else {
+                    None
+                };
                 files.push(ServerFileChange::Upsert {
                     path: path.clone(),
                     sha256: entry.sha256.clone(),
-                    content_base64: STANDARD.encode(content),
+                    size: Some(entry.size),
+                    content_base64,
                 });
             }
         }
@@ -1330,7 +1354,7 @@ impl VaultService {
         {
             Ok(files) => files,
             Err(_) => {
-                self.changed_files_since(repo, binary_root, base_head, &[])
+                self.changed_files_since(repo, binary_root, base_head, &[], true)
                     .await?
             }
         };
@@ -1373,7 +1397,8 @@ impl VaultService {
                     Ok(content) => files.push(ServerFileChange::Upsert {
                         path: path.clone(),
                         sha256: sha256_hex(&content),
-                        content_base64: STANDARD.encode(content),
+                        size: Some(content.len() as u64),
+                        content_base64: Some(STANDARD.encode(content)),
                     }),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         files.push(ServerFileChange::Delete { path: path.clone() })
@@ -1384,7 +1409,10 @@ impl VaultService {
                 files.push(ServerFileChange::Upsert {
                     path: path.clone(),
                     sha256: entry.sha256.clone(),
-                    content_base64: STANDARD.encode(read_binary_object(binary_root, entry).await?),
+                    size: Some(entry.size),
+                    content_base64: Some(
+                        STANDARD.encode(read_binary_object(binary_root, entry).await?),
+                    ),
                 });
             }
         }

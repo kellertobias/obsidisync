@@ -7,7 +7,9 @@ use obsidian_git_sync_server::auth_throttle::IP_FAILURE_LIMIT;
 use obsidian_git_sync_server::http::{
     router, router_with_webdav_limit, AppState, PublicAuthConfig,
 };
-use obsidian_git_sync_server::protocol::{RegisterRequest, ServerFileChange, SyncRequest};
+use obsidian_git_sync_server::protocol::{
+    FileContentMode, RegisterRequest, ServerFileChange, SyncRequest,
+};
 use obsidian_git_sync_server::vault::VaultService;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -128,6 +130,7 @@ async fn sync_files(app: &axum::Router, base_head: Option<&str>) -> (Value, Vec<
                         device_name: "iPhone".to_string(),
                         changes: vec![],
                         client_manifest: vec![],
+                        file_content: Default::default(),
                     })
                     .unwrap(),
                 ))
@@ -551,7 +554,7 @@ async fn webdav_uploads_reach_obsidian_clients_through_sync() {
                 path,
                 content_base64,
                 ..
-            } if path == "Tablet/Notes/Meeting notes.pdf" => Some(content_base64.clone()),
+            } if path == "Tablet/Notes/Meeting notes.pdf" => content_base64.clone(),
             _ => None,
         })
         .unwrap();
@@ -1022,4 +1025,135 @@ async fn webdav_serves_byte_ranges() {
         beyond.headers().get(header::CONTENT_RANGE).unwrap(),
         "bytes */100"
     );
+}
+
+#[tokio::test]
+async fn sync_reference_mode_returns_metadata_and_blob_endpoint_serves_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let app = app(root.path());
+    register(&app).await;
+    let created = create_password(&app, "Boox", "Tablet").await;
+    let auth = basic("alice", created["password"].as_str().unwrap());
+    let pdf: Vec<u8> = (0..=255).cycle().take(70_000).collect();
+    let put = dav(
+        &app,
+        "PUT",
+        "/dav/notes/Tablet/big.pdf",
+        Some(&auth),
+        &[],
+        pdf.clone(),
+    )
+    .await;
+    assert_eq!(put.status(), StatusCode::CREATED);
+    let put = dav(
+        &app,
+        "PUT",
+        "/dav/notes/Tablet/note.md",
+        Some(&auth),
+        &[],
+        b"# hi\n".to_vec(),
+    )
+    .await;
+    assert_eq!(put.status(), StatusCode::CREATED);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/users/alice/vaults/notes/sync")
+                .header("authorization", BEARER)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&SyncRequest {
+                        base_head: None,
+                        client_id: "tablet".to_string(),
+                        device_name: "Android".to_string(),
+                        changes: vec![],
+                        client_manifest: vec![],
+                        file_content: FileContentMode::Reference,
+                    })
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let head = body["serverHead"].as_str().unwrap().to_string();
+    let files = body["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2);
+    let big = files
+        .iter()
+        .find(|file| file["path"] == "Tablet/big.pdf")
+        .unwrap();
+    assert!(big.get("contentBase64").is_none(), "{big}");
+    assert_eq!(big["size"], 70_000);
+    let expected_sha = obsidian_git_sync_server::binary_store::sha256_hex(&pdf);
+    assert_eq!(big["sha256"], expected_sha);
+    let note = files
+        .iter()
+        .find(|file| file["path"] == "Tablet/note.md")
+        .unwrap();
+    assert!(note.get("contentBase64").is_none());
+    assert_eq!(note["size"], 5);
+
+    for (path, expected) in [
+        ("Tablet/big.pdf", pdf.clone()),
+        ("Tablet/note.md", b"# hi\n".to_vec()),
+    ] {
+        let blob = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!(
+                        "/v1/users/alice/vaults/notes/blob?path={}&hash={head}",
+                        path.replace('/', "%2F")
+                    ))
+                    .header("authorization", BEARER)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blob.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            blob.headers().get("x-content-sha256").unwrap(),
+            &obsidian_git_sync_server::binary_store::sha256_hex(&expected)
+        );
+        assert_eq!(
+            to_bytes(blob.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+            expected
+        );
+    }
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/v1/users/alice/vaults/notes/blob?path=Tablet%2Fbig.pdf&hash={head}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+    // Inline remains the default for clients that do not send the field.
+    let (_, inline_files) = sync_files(&app, None).await;
+    assert!(inline_files.iter().all(|file| matches!(
+        file,
+        ServerFileChange::Upsert {
+            content_base64: Some(_),
+            ..
+        }
+    )));
 }

@@ -71,8 +71,9 @@ fn protocol_matches_plugin_json_field_names() {
     let response = serde_json::to_value(
         obsidian_git_sync_server::protocol::ServerFileChange::Upsert {
             path: "Note.md".to_string(),
-            content_base64: "aGVsbG8=".to_string(),
+            content_base64: Some("aGVsbG8=".to_string()),
             sha256: "abc".to_string(),
+            size: Some(5),
         },
     )
     .unwrap();
@@ -1179,6 +1180,7 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
             ResolveRequest {
                 client_id: "device-b".to_string(),
                 device_name: "iPhone".to_string(),
+                file_content: Default::default(),
                 files: vec![ResolvedFile {
                     path: "Note.md".to_string(),
                     content_base64: Some(STANDARD.encode(b"resolved\n")),
@@ -1520,6 +1522,7 @@ fn empty_sync(base_head: Option<String>) -> SyncRequest {
         device_name: "iPhone".to_string(),
         changes: vec![],
         client_manifest: vec![],
+        file_content: Default::default(),
     }
 }
 
@@ -1552,7 +1555,8 @@ fn file_text(files: &[obsidian_git_sync_server::protocol::ServerFileChange], pat
         } = file
         {
             if file_path == path {
-                return String::from_utf8(STANDARD.decode(content_base64).unwrap()).unwrap();
+                let content = content_base64.as_deref().expect("inline content");
+                return String::from_utf8(STANDARD.decode(content).unwrap()).unwrap();
             }
         }
     }

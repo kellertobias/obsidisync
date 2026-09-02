@@ -4,6 +4,7 @@ import { shouldIgnoreVaultPath } from "./ignore";
 import { diffManifests } from "./manifest";
 import { ClientChange, ManifestEntry, ServerFileChange } from "./protocol";
 import { assertSafeVaultPath } from "./security";
+import { serverFileAlreadyLocal } from "./serverFiles";
 
 export interface CollectedVaultChanges {
   manifest: ManifestEntry[];
@@ -12,6 +13,18 @@ export interface CollectedVaultChanges {
 
 export interface CollectChangesOptions {
   stageUpload?: (path: string, buffer: ArrayBuffer, entry: ManifestEntry) => Promise<string>;
+}
+
+export type ServerUpsert = Extract<ServerFileChange, { op: "upsert" }>;
+
+export interface ApplyServerFilesOptions {
+  /** Fetches the bytes of a file the server sent without inline content. */
+  download?: (file: ServerUpsert) => Promise<ArrayBuffer>;
+  /** sha256 of files already on disk; matching upserts are skipped without touching the file. */
+  localHashes?: Map<string, string>;
+  onProgress?: (done: number, total: number, path: string) => void;
+  /** Called after every file that was written or deleted, so progress can be persisted. */
+  onApplied?: (change: { path: string; entry: ManifestEntry | null }) => Promise<void>;
 }
 
 export class VaultState {
@@ -98,21 +111,53 @@ export class VaultState {
     }
   }
 
-  async applyServerFiles(files: ServerFileChange[]): Promise<void> {
-    for (const file of files) {
+  /**
+   * Writes server changes to disk one file at a time. Files arrive either inline (base64) or as
+   * references that are downloaded on demand, so memory use stays bounded by the largest file
+   * rather than by the vault. Returns the number of files written or deleted.
+   */
+  async applyServerFiles(files: ServerFileChange[], options: ApplyServerFilesOptions = {}): Promise<number> {
+    let applied = 0;
+    for (const [index, file] of files.entries()) {
       const safePath = assertSafeVaultPath(file.path);
       if (shouldIgnoreVaultPath(safePath)) continue;
       const normalizedPath = normalizePath(safePath);
+      options.onProgress?.(index + 1, files.length, safePath);
+
       if (file.op === "delete") {
         if (await this.vault.adapter.exists(normalizedPath, true)) {
           await this.vault.adapter.remove(normalizedPath);
         }
+        applied += 1;
+        await options.onApplied?.({ path: safePath, entry: null });
         continue;
       }
 
+      if (serverFileAlreadyLocal(file, options.localHashes) && (await this.vault.adapter.exists(normalizedPath, true))) {
+        continue;
+      }
+
+      let buffer: ArrayBuffer;
+      if (typeof file.contentBase64 === "string") {
+        buffer = base64ToArrayBuffer(file.contentBase64);
+      } else if (options.download) {
+        buffer = await options.download(file);
+      } else {
+        throw new Error(`Server sent no content for ${safePath}`);
+      }
+
       await this.ensureParentFolder(normalizedPath);
-      await this.vault.adapter.writeBinary(normalizedPath, base64ToArrayBuffer(file.contentBase64));
+      await this.vault.adapter.writeBinary(normalizedPath, buffer);
+      applied += 1;
+      if (options.onApplied) {
+        const stat = await this.vault.adapter.stat(normalizedPath);
+        await options.onApplied({
+          path: safePath,
+          entry: { path: safePath, sha256: file.sha256, mtime: stat?.mtime ?? Date.now(), size: buffer.byteLength }
+        });
+      }
     }
+    return applied;
   }
 
   private async ensureParentFolder(path: string): Promise<void> {

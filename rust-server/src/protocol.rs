@@ -25,14 +25,34 @@ pub enum ClientChange {
     Delete { path: String },
 }
 
+/// How a sync response carries file contents. `Reference` returns only path, hash, and size so
+/// memory-constrained clients can fetch each file separately through the blob endpoint.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum FileContentMode {
+    #[default]
+    Inline,
+    Reference,
+}
+
+impl FileContentMode {
+    pub fn is_inline(self) -> bool {
+        self == FileContentMode::Inline
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ServerFileChange {
     #[serde(rename = "upsert")]
     Upsert {
         path: String,
-        content_base64: String,
+        /// Absent when the client asked for `FileContentMode::Reference`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_base64: Option<String>,
         sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
     },
     #[serde(rename = "delete")]
     Delete { path: String },
@@ -64,6 +84,8 @@ pub struct SyncRequest {
     pub device_name: String,
     pub changes: Vec<ClientChange>,
     pub client_manifest: Vec<ManifestEntry>,
+    #[serde(default)]
+    pub file_content: FileContentMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -132,6 +154,8 @@ pub struct ResolveRequest {
     pub client_id: String,
     pub device_name: String,
     pub files: Vec<ResolvedFile>,
+    #[serde(default)]
+    pub file_content: FileContentMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -358,6 +358,12 @@ The first time a vault syncs with the server, the plugin does not merge automati
 
 After either choice completes, normal merge-based syncing takes over. Use **Reset registration** in the advanced settings to forget the sync state and have the plugin ask again on the next sync.
 
+### Large vaults and low-memory devices
+
+Sync responses can carry file contents in two ways. Older clients receive every changed file inline as base64 inside one JSON body, which on a first sync means the whole vault at once; mobile WebViews cap a single page at a few hundred MB regardless of device RAM, so a large vault could crash Obsidian on Android during the initial sync.
+
+Current plugins ask for `fileContent: "reference"` when the server advertises `syncFileReferences`. The server then returns only path, hash, and size for each changed file and the plugin downloads them one at a time from `GET /v1/users/{user}/vaults/{vault}/blob?path=...&hash=...`, verifying each checksum, so peak memory is the largest single file. Files already on disk with the same hash are skipped, progress is shown in a notice, and the local manifest is saved as files land, so an interrupted first sync resumes where it stopped instead of re-downloading or re-uploading everything. Old servers keep receiving inline requests, and old plugins keep receiving inline responses.
+
 ### Sync status and recovery
 
 The settings page shows:
@@ -466,6 +472,7 @@ Do not restore only the Git repository without the binary object store. Binary f
 - `GET /v1/users/{user}/feed`
 - `GET /v1/users/{user}/vaults/{vault}/history?path=Note.md`
 - `GET /v1/users/{user}/vaults/{vault}/file?path=Note.md&hash=<commit>`
+- `GET /v1/users/{user}/vaults/{vault}/blob?path=Note.md&hash=<commit>` raw bytes, used with `fileContent: "reference"`
 - `POST /v1/users/{user}/vaults/{vault}/resolve`
 - `GET /v1/users/{user}/vaults/{vault}/device-passwords`
 - `POST /v1/users/{user}/vaults/{vault}/device-passwords`

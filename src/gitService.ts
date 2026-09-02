@@ -1,9 +1,10 @@
-import { Notice, requestUrl, Vault } from "obsidian";
+import { Notice, requestUrl, RequestUrlResponse, Vault } from "obsidian";
 import { arrayBufferToBase64 } from "./base64";
 import { diffManifests } from "./manifest";
 import {
   ClientChange,
   CreateDevicePasswordRequest,
+  FileContentMode,
   CreatedDevicePassword,
   DevicePasswordEntry,
   DeviceVersionEntry,
@@ -26,9 +27,16 @@ import {
 } from "./protocol";
 import { devicePasswordsAvailabilityMessage } from "./devicePasswords";
 import { getDeviceName } from "./runtime";
+import {
+  describeDownloadProgress,
+  hashesByPath,
+  removeManifestEntry,
+  serverSupportsFileReferences,
+  upsertManifestEntry
+} from "./serverFiles";
 import { IosGitSyncSettings } from "./settings";
 import { assertGitBranch, assertNamespaceSlug, assertSecureHttpUrl } from "./security";
-import { sha256Hex, VaultState } from "./vaultState";
+import { ServerUpsert, sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
 type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
@@ -40,6 +48,8 @@ const CLIENT_API_VERSION = 1;
 const OIDC_REFRESH_WINDOW_MS = 60_000;
 const OIDC_MAINTENANCE_REFRESH_WINDOW_MS = 60 * 60 * 1000;
 const OIDC_MAINTENANCE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DOWNLOAD_PROGRESS_SAVE_EVERY = 10;
+const DOWNLOAD_PROGRESS_NOTICE_MIN_FILES = 5;
 
 export interface OidcDeviceAuthorization {
   device_code: string;
@@ -297,11 +307,12 @@ export class GitService {
       clientId: this.settings.clientId,
       deviceName: this.deviceName(),
       changes,
-      clientManifest: manifest
+      clientManifest: manifest,
+      fileContent: this.fileContentMode()
     };
 
     const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
-    await vaultState.applyServerFiles(response.files);
+    await this.applyServerFiles(vaultState, response.files, response.serverHead, hashesByPath(manifest));
 
     if (response.status === "conflict") {
       this.settings.syncStatus = "error";
@@ -362,7 +373,8 @@ export class GitService {
         clientId: this.settings.clientId,
         deviceName: this.deviceName(),
         changes,
-        clientManifest: localManifest
+        clientManifest: localManifest,
+        fileContent: this.fileContentMode()
       };
       const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
       if (response.status === "conflict") {
@@ -402,7 +414,7 @@ export class GitService {
       const localManifest = await vaultState.computeManifest();
       const deletePaths = localManifest.map((entry) => entry.path).filter((path) => !serverPaths.has(path));
       await vaultState.deletePaths(deletePaths);
-      await vaultState.applyServerFiles(probe.files);
+      await this.applyServerFiles(vaultState, probe.files, probe.serverHead, hashesByPath(localManifest));
 
       const completedAt = new Date().toISOString();
       this.settings.serverHead = probe.serverHead;
@@ -421,14 +433,16 @@ export class GitService {
 
   // Reads the server's current head and full file list without mutating the server: an empty
   // change set means nothing is committed or pushed, and an empty client manifest makes the
-  // server report every file it has.
+  // server report every file it has. In reference mode this is metadata only; contents are
+  // fetched per file when they are actually needed.
   private async probeServerState(): Promise<{ serverHead: string | null; files: ServerFileChange[] }> {
     const request: SyncRequest = {
       baseHead: this.settings.serverHead || null,
       clientId: this.settings.clientId,
       deviceName: this.deviceName(),
       changes: [],
-      clientManifest: []
+      clientManifest: [],
+      fileContent: this.fileContentMode()
     };
     const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
     return { serverHead: response.serverHead, files: response.files };
@@ -469,11 +483,12 @@ export class GitService {
       const request: ResolveRequest = {
         clientId: this.settings.clientId,
         deviceName: this.deviceName(),
-        files: [{ path, uploadId }]
+        files: [{ path, uploadId }],
+        fileContent: this.fileContentMode()
       };
       const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/resolve`, request);
       const vaultState = new VaultState(this.vault);
-      await vaultState.applyServerFiles(response.files);
+      await this.applyServerFiles(vaultState, response.files, response.serverHead, hashesByPath(this.settings.localManifest));
       this.settings.serverHead = response.serverHead;
       this.settings.lastSyncedAt = new Date().toISOString();
       this.settings.lastSyncCompletedAt = this.settings.lastSyncedAt;
@@ -737,6 +752,59 @@ export class GitService {
     }
   }
 
+  private fileContentMode(): FileContentMode {
+    return serverSupportsFileReferences(this.settings.serverFeatures) ? "reference" : "inline";
+  }
+
+  /**
+   * Applies server changes file by file. Files the server sent as references are downloaded
+   * individually and verified; files already on disk with the same hash are skipped; progress is
+   * persisted to the local manifest as it goes, so an interrupted sync continues where it stopped
+   * instead of re-downloading (or worse, re-uploading) everything on the next run.
+   */
+  private async applyServerFiles(
+    vaultState: VaultState,
+    files: ServerFileChange[],
+    serverHead: string | null,
+    localHashes: Map<string, string>
+  ): Promise<void> {
+    const notice = files.length >= DOWNLOAD_PROGRESS_NOTICE_MIN_FILES ? new Notice("ObsidiSync: applying server changes...", 0) : null;
+    let appliedSinceSave = 0;
+    try {
+      await vaultState.applyServerFiles(files, {
+        localHashes,
+        download: (file) => this.downloadServerFile(file, serverHead),
+        onProgress: (done, total, path) => notice?.setMessage(describeDownloadProgress(done, total, path)),
+        onApplied: async ({ path, entry }) => {
+          this.settings.localManifest = entry
+            ? upsertManifestEntry(this.settings.localManifest, entry)
+            : removeManifestEntry(this.settings.localManifest, path);
+          appliedSinceSave += 1;
+          if (appliedSinceSave >= DOWNLOAD_PROGRESS_SAVE_EVERY) {
+            appliedSinceSave = 0;
+            await this.saveSettings();
+          }
+        }
+      });
+    } finally {
+      if (appliedSinceSave > 0) await this.saveSettings();
+      notice?.hide();
+    }
+  }
+
+  private async downloadServerFile(file: ServerUpsert, serverHead: string | null): Promise<ArrayBuffer> {
+    if (!serverHead) throw new Error(`Server sent ${file.path} without content or a version to fetch it from`);
+    const buffer = await this.requestBinary(
+      "GET",
+      `${this.vaultPath()}/blob?path=${encodeURIComponent(file.path)}&hash=${encodeURIComponent(serverHead)}`
+    );
+    const actual = await sha256Hex(buffer);
+    if (actual !== file.sha256) {
+      throw new Error(`Downloaded ${file.path} does not match the server checksum`);
+    }
+    return buffer;
+  }
+
   private async uploadBuffer(path: string, buffer: ArrayBuffer, entry?: ManifestEntry): Promise<string> {
     const sha256 = entry?.sha256 ?? (await sha256Hex(buffer));
     const initRequest: UploadInitRequest = {
@@ -776,6 +844,16 @@ export class GitService {
   }
 
   private async requestJson<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+    const response = await this.requestWithAuth(method, path, body);
+    return response.json as T;
+  }
+
+  private async requestBinary(method: "GET", path: string): Promise<ArrayBuffer> {
+    const response = await this.requestWithAuth(method, path);
+    return response.arrayBuffer;
+  }
+
+  private async requestWithAuth(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<RequestUrlResponse> {
     const serverUrl = this.settings.serverUrl.replace(/\/+$/, "");
     await this.refreshExpiringOidcAccessToken();
     const send = () =>
@@ -794,7 +872,7 @@ export class GitService {
       if (await this.refreshOidcAccessToken()) {
         response = await send();
         if (response.status >= 200 && response.status < 300) {
-          return response.json as T;
+          return response;
         }
       }
       if (!this.settings.lastLoginError) {
@@ -804,10 +882,10 @@ export class GitService {
     }
 
     if (response.status < 200 || response.status >= 300) {
-      throw new HttpStatusError(response.status, serverErrorMessage(response.text, response.status));
+      throw new HttpStatusError(response.status, serverErrorMessage(responseText(response), response.status));
     }
 
-    return response.json as T;
+    return response;
   }
 
   private async oidcDiscovery(): Promise<OidcDiscovery> {
@@ -941,6 +1019,15 @@ export class HttpStatusError extends Error {
   ) {
     super(message);
     this.name = "HttpStatusError";
+  }
+}
+
+function responseText(response: RequestUrlResponse): string | undefined {
+  try {
+    return response.text;
+  } catch {
+    // Binary bodies cannot be decoded as text.
+    return undefined;
   }
 }
 

@@ -20,7 +20,7 @@ const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
 /// Optional capabilities advertised to clients. Older plugins ignore the list; newer plugins
 /// hide or explain features that the server they talk to does not have yet.
-const SERVER_FEATURES: &[&str] = &["webdavDevicePasswords"];
+const SERVER_FEATURES: &[&str] = &["webdavDevicePasswords", "syncFileReferences"];
 /// PDFs exported from note-taking tablets are routinely larger than the JSON sync payload limit.
 pub const DEFAULT_WEBDAV_MAX_BODY_BYTES: usize = 200 * 1024 * 1024;
 
@@ -195,6 +195,7 @@ pub fn router_with_webdav_limit(
         .route("/v1/users/:user/vaults/:vault/sync", post(sync))
         .route("/v1/users/:user/vaults/:vault/history", get(history))
         .route("/v1/users/:user/vaults/:vault/file", get(file_at_version))
+        .route("/v1/users/:user/vaults/:vault/blob", get(blob_at_version))
         .route("/v1/users/:user/vaults/:vault/resolve", post(resolve))
         .route("/v1/users/:user/vaults/:vault/devices", get(devices))
         .route(
@@ -811,6 +812,37 @@ async fn file_at_version(
             .file_at_version(&user, &vault, &query.path, &query.hash)
             .await?,
     ))
+}
+
+/// Raw file bytes at a commit. Complements `sync` in `FileContentMode::Reference`, where the
+/// client downloads each changed file separately instead of receiving the vault as one JSON body.
+async fn blob_at_version(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Query(query): Query<FileQuery>,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    let (path, content) = state
+        .vaults
+        .file_bytes_at_version(&user, &vault, &query.path, &query.hash)
+        .await?;
+    let sha256 = crate::binary_store::sha256_hex(&content);
+    Ok((
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                crate::webdav::content_type_for(&path).to_string(),
+            ),
+            (header::CONTENT_LENGTH, content.len().to_string()),
+            (header::ETAG, format!("\"{sha256}\"")),
+            (header::CACHE_CONTROL, "private, max-age=0".to_string()),
+            (header::HeaderName::from_static("x-content-sha256"), sha256),
+        ],
+        content,
+    )
+        .into_response())
 }
 
 async fn resolve(
