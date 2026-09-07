@@ -125,6 +125,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route(START_PATH, get(start))
         .route(CALLBACK_PATH, get(callback))
+        .layer(axum::middleware::from_fn(crate::nextcloud::log_request))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -194,7 +195,10 @@ async fn callback(
     }
     match callback_inner(&state, &headers, query).await {
         Ok(response) => response,
-        Err(error) => error_page("Login failed", &format!("{error:#}")),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "OIDC browser login failed");
+            error_page("Login failed", &format!("{error:#}"))
+        }
     }
 }
 
@@ -249,6 +253,7 @@ async fn callback_inner(
         .login_oidc(&token.access_token)
         .await
         .context("the access token was not accepted by this server")?;
+    tracing::info!(user = %session.user, next = next.as_deref().unwrap_or("/change-feed"), "OIDC browser login succeeded");
     Ok(redirect_with_site_session(
         next.as_deref().unwrap_or("/change-feed"),
         &session.access_token,

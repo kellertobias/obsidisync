@@ -20,6 +20,7 @@ use anyhow::{anyhow, Result};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Form, Path as AxumPath, Query, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -138,6 +139,22 @@ impl LoginFlow {
     }
 }
 
+/// Logs every request to the emulated Nextcloud surface at info level (method, path, status),
+/// never bodies or credentials, so a failing app login can be traced in the server log.
+pub async fn log_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let user_agent = request
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let response = next.run(request).await;
+    tracing::info!(%method, %path, status = response.status().as_u16(), user_agent = %user_agent, "nextcloud request");
+    response
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/status.php", get(status))
@@ -159,6 +176,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/remote.php/dav", any(webdav))
         .route("/remote.php/dav/", any(webdav))
         .route("/remote.php/dav/*path", any(webdav))
+        .layer(middleware::from_fn(log_request))
 }
 
 async fn status() -> Json<serde_json::Value> {
@@ -177,14 +195,17 @@ async fn status() -> Json<serde_json::Value> {
 async fn login_flow_init(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let base = public_base_url(&headers);
     match state.login_flows.create().await {
-        Ok((flow_token, poll_token)) => Json(serde_json::json!({
-            "poll": {
-                "token": poll_token,
-                "endpoint": format!("{base}/index.php/login/v2/poll"),
-            },
-            "login": format!("{base}/index.php/login/v2/flow/{flow_token}"),
-        }))
-        .into_response(),
+        Ok((flow_token, poll_token)) => {
+            tracing::info!(flow = %&flow_token[..8], "saber login flow started");
+            Json(serde_json::json!({
+                "poll": {
+                    "token": poll_token,
+                    "endpoint": format!("{base}/index.php/login/v2/poll"),
+                },
+                "login": format!("{base}/index.php/login/v2/flow/{flow_token}"),
+            }))
+            .into_response()
+        }
         Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
     }
 }
@@ -221,12 +242,15 @@ async fn login_flow_poll(
         return (StatusCode::BAD_REQUEST, "token is required").into_response();
     };
     match state.login_flows.poll(&token).await {
-        Some(credentials) => Json(serde_json::json!({
-            "server": public_base_url(&headers),
-            "loginName": credentials.login_name,
-            "appPassword": credentials.app_password,
-        }))
-        .into_response(),
+        Some(credentials) => {
+            tracing::info!(user = %credentials.login_name, "saber login flow credentials delivered to the app");
+            Json(serde_json::json!({
+                "server": public_base_url(&headers),
+                "loginName": credentials.login_name,
+                "appPassword": credentials.app_password,
+            }))
+            .into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -344,6 +368,7 @@ async fn login_flow_submit(
         None => None,
     };
     let Some(user) = user else {
+        tracing::warn!(flow = %&token[..token.len().min(8)], "saber connect form submitted without a session");
         return flow_error(
             &token,
             "Not signed in. Log in first, or paste a valid access token.",
@@ -407,6 +432,7 @@ async fn login_flow_submit(
     if !state.login_flows.complete(&token, credentials).await {
         return flow_error(&token, "This login link was already used.");
     }
+    tracing::info!(user = %user, vault = %vault, device = %created.entry.label, "saber login flow completed; waiting for the app to poll");
     let base = public_base_url(&headers);
     Html(render_done_page(&base, &user, &created.password)).into_response()
 }
@@ -437,8 +463,12 @@ async fn ocs_user(
     let client_ip = client_ip_for(&headers, connect_info);
     let grant = match authenticate_device(&state, &headers, &client_ip).await {
         Ok(grant) => grant,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            tracing::warn!("OCS user lookup rejected: device password did not authenticate");
+            return error.into_response();
+        }
     };
+    tracing::info!(user = %grant.user, device = %grant.label, "OCS user lookup succeeded");
     Json(serde_json::json!({
         "ocs": {
             "meta": { "status": "ok", "statuscode": 200, "message": "OK" },
