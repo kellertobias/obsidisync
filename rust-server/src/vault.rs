@@ -1732,13 +1732,19 @@ async fn apply_text_upsert(
 ) -> Result<Option<SyncConflict>> {
     let absolute = repo_path(repo, path)?;
     let current = fs::read(&absolute).await.ok();
-    let base = if path_ack.is_some() {
-        match base_head {
-            Some(head) => read_file_at_commit(repo, head, path).await?,
-            None => None,
-        }
-    } else {
+    let base_at_head = match base_head {
+        Some(head) => read_file_at_commit(repo, head, path).await?,
+        None => None,
+    };
+    // A missing per-path ack means this device may never have seen the path. That only matters
+    // when the server has no current file either: then the upload is a genuine first-time create
+    // even if the name existed at base_head through another device's create+delete. When the
+    // server does hold the file, the device's vault-wide base_head is the right merge base;
+    // devices that synced before acks were recorded have none for their older files.
+    let base = if current.is_none() && path_ack.is_none() {
         None
+    } else {
+        base_at_head
     };
 
     match (base, current) {
@@ -1790,7 +1796,7 @@ async fn apply_text_upsert(
 async fn apply_text_delete(
     repo: &Path,
     base_head: Option<&str>,
-    path_ack: Option<&str>,
+    _path_ack: Option<&str>,
     path: &str,
 ) -> Result<Option<SyncConflict>> {
     let absolute = repo_path(repo, path)?;
@@ -1798,13 +1804,12 @@ async fn apply_text_delete(
     let Some(current) = current else {
         return Ok(None);
     };
-    let base = if path_ack.is_some() {
-        match base_head {
-            Some(head) => read_file_at_commit(repo, head, path).await?,
-            None => None,
-        }
-    } else {
-        None
+    // A device can only delete a file it holds, so the vault-wide base_head is always the right
+    // base here; an absent per-path ack must not turn the delete into a silent overwrite of
+    // server-side edits.
+    let base = match base_head {
+        Some(head) => read_file_at_commit(repo, head, path).await?,
+        None => None,
     };
     if base.as_ref() == Some(&current) || base.is_none() {
         let _ = fs::remove_file(absolute).await;

@@ -1373,6 +1373,57 @@ async fn brand_new_file_does_not_conflict_when_device_never_touched_the_path() {
 }
 
 #[tokio::test]
+async fn edit_with_current_base_head_does_not_conflict_without_a_path_ack() {
+    // Models a device that completed its initial sync before per-path acks existed: the server
+    // knows the device (its base_head is current) but has no per-path ack for any of its files.
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let head = first.server_head.clone();
+
+    // The legacy device syncs with the current head and nothing to report, so
+    // changed_files_since is empty and no path ack is recorded for Note.md.
+    let legacy_first = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "legacy-device".to_string(),
+                ..empty_sync(head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy_first.status, SyncStatus::Ok);
+    assert_eq!(legacy_first.server_head, head);
+
+    // Nobody else touched the server. The legacy device edits its up-to-date copy of Note.md.
+    let edited = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "legacy-device".to_string(),
+                changes: vec![upsert("Note.md", b"hello, edited locally\n")],
+                ..empty_sync(head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        edited.status,
+        SyncStatus::Ok,
+        "an edit against the current head must not conflict just because the path ack is missing: {:?}",
+        edited.conflicts
+    );
+}
+
+#[tokio::test]
 async fn stale_edit_of_a_path_the_device_has_seen_before_still_conflicts() {
     let fixture = GitFixture::new().await;
     fixture.seed_file("Note.md", b"hello\n").await;
