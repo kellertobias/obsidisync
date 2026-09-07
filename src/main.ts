@@ -20,6 +20,8 @@ export default class ObsidiSyncPlugin extends Plugin {
   private timer: number | null = null;
   private loginRenewalTimer: number | null = null;
   private conflictResolverOpen = false;
+  /** Conflict paths the user last closed the resolver on without resolving them. */
+  private dismissedConflictKey: string | null = null;
   private initialSyncModalOpen = false;
   private mobileSyncIndicatorEl: HTMLElement | null = null;
   private mobileSyncIndicatorRequestId = 0;
@@ -52,7 +54,7 @@ export default class ObsidiSyncPlugin extends Plugin {
       this.app.vault,
       this.settings,
       () => this.saveSettings(),
-      (conflicts) => this.openConflictResolver(conflicts),
+      (conflicts) => this.openConflictResolver(conflicts, { explicit: true }),
       () => (this.conflictResolverOpen ? "Finish conflict resolution before starting another sync." : null)
     );
 
@@ -534,7 +536,7 @@ export default class ObsidiSyncPlugin extends Plugin {
     }
     const conflicts = await this.gitService.sync();
     if (conflicts.length > 0) {
-      this.openConflictResolver(conflicts);
+      this.openConflictResolver(conflicts, { explicit: false });
     }
   }
 
@@ -569,14 +571,24 @@ export default class ObsidiSyncPlugin extends Plugin {
     ).open();
   }
 
-  private openConflictResolver(conflicts: SyncConflict[] = []): void {
+  /**
+   * Opens the resolver. Automatic openings (after a sync) are skipped when the user already
+   * dismissed the resolver for exactly this set of conflicts, so a periodic sync does not keep
+   * forcing the dialog back open; the clickable conflict notice and the command still work.
+   */
+  private openConflictResolver(conflicts: SyncConflict[] = [], options: { explicit: boolean } = { explicit: true }): void {
     if (this.conflictResolverOpen) {
-      new Notice("Conflict resolver is already open");
+      if (options.explicit) new Notice("Conflict resolver is already open");
+      return;
+    }
+    const key = conflictKey(conflicts.map((conflict) => conflict.path));
+    if (!options.explicit && key !== null && key === this.dismissedConflictKey) {
       return;
     }
     this.conflictResolverOpen = true;
-    new ConflictResolverModal(this.app, this.gitService, conflicts, () => {
+    new ConflictResolverModal(this.app, this.gitService, conflicts, (remainingPaths) => {
       this.conflictResolverOpen = false;
+      this.dismissedConflictKey = conflictKey(remainingPaths);
       void this.refreshFileHistoryViews();
       this.updateMobileSyncIndicator();
     }).open();
@@ -658,6 +670,11 @@ export default class ObsidiSyncPlugin extends Plugin {
       }
     }
   }
+}
+
+function conflictKey(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  return Array.from(new Set(paths)).sort().join("\n");
 }
 
 function formatMobileSyncDate(date: string | null): string {

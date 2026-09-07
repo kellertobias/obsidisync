@@ -164,6 +164,9 @@ pub struct ResolvedFile {
     pub path: String,
     pub content_base64: Option<String>,
     pub upload_id: Option<String>,
+    /// When true the conflict is resolved by removing the file; no content is required.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

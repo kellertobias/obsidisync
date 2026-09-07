@@ -40,6 +40,11 @@ import { ServerUpsert, sha256Hex, VaultState } from "./vaultState";
 
 type SaveSettings = () => Promise<void>;
 type ConflictNoticeHandler = (conflicts: SyncConflict[]) => void;
+
+export type ConflictResolution =
+  | { path: string; kind: "text"; content: string }
+  | { path: string; kind: "current" }
+  | { path: string; kind: "delete" };
 type SyncStateListener = (running: boolean) => void;
 type LoginStatusListener = (status: LoginStatus) => void;
 type SyncBlocker = () => string | null;
@@ -474,16 +479,38 @@ export class GitService {
     return this.getJson<VersionFileResponse>(`${this.vaultPath()}/file?path=${encodeURIComponent(path)}&hash=${encodeURIComponent(hash)}`);
   }
 
-  async resolveFile(path: string): Promise<void> {
-    await this.exclusive(async () => {
+  /**
+   * Pushes one or more conflict resolutions in a single request and returns the conflicts the
+   * server still reports afterwards (empty when everything was accepted).
+   */
+  async resolveConflicts(resolutions: ConflictResolution[]): Promise<SyncConflict[]> {
+    if (resolutions.length === 0) return [];
+    if (this.running) {
+      throw new Error("A sync is running. Wait for it to finish, then try again.");
+    }
+    const result = await this.exclusive(async () => {
       this.requireConfigured();
       await this.checkServerCompatibility();
-      const buffer = await this.vault.adapter.readBinary(path);
-      const uploadId = await this.uploadBuffer(path, buffer);
+      const files: ResolveRequest["files"] = [];
+      for (const resolution of resolutions) {
+        if (resolution.kind === "delete") {
+          if (await this.vault.adapter.exists(resolution.path, true)) {
+            await this.vault.adapter.remove(resolution.path);
+          }
+          files.push({ path: resolution.path, delete: true });
+          continue;
+        }
+        if (resolution.kind === "text") {
+          await this.vault.adapter.write(resolution.path, resolution.content);
+        }
+        const buffer = await this.vault.adapter.readBinary(resolution.path);
+        const uploadId = await this.uploadBuffer(resolution.path, buffer);
+        files.push({ path: resolution.path, uploadId });
+      }
       const request: ResolveRequest = {
         clientId: this.settings.clientId,
         deviceName: this.deviceName(),
-        files: [{ path, uploadId }],
+        files,
         fileContent: this.fileContentMode()
       };
       const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/resolve`, request);
@@ -495,13 +522,17 @@ export class GitService {
       this.settings.lastSyncError = response.status === "conflict" ? "Conflict remains after resolve attempt" : null;
       this.settings.localManifest = await vaultState.computeManifest();
       await this.saveSettings();
-      new Notice(response.status === "conflict" ? "Conflict remains after resolve attempt" : "Conflict resolution pushed");
+      return response.status === "conflict" ? response.conflicts : [];
     });
+    return result ?? [];
   }
 
-  async resolveTextFile(path: string, content: string): Promise<void> {
-    await this.vault.adapter.write(path, content);
-    await this.resolveFile(path);
+  async resolveFile(path: string): Promise<SyncConflict[]> {
+    return this.resolveConflicts([{ path, kind: "current" }]);
+  }
+
+  async resolveTextFile(path: string, content: string): Promise<SyncConflict[]> {
+    return this.resolveConflicts([{ path, kind: "text", content }]);
   }
 
   /**

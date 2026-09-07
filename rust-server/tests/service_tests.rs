@@ -1185,6 +1185,7 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
                     path: "Note.md".to_string(),
                     content_base64: Some(STANDARD.encode(b"resolved\n")),
                     upload_id: None,
+                    delete: false,
                 }],
             },
         )
@@ -1195,6 +1196,96 @@ async fn returns_mobile_resolvable_conflict_markers_for_same_file_edits() {
     assert_eq!(
         fs::read_to_string(clone.join("Note.md")).await.unwrap(),
         "resolved\n"
+    );
+}
+
+#[tokio::test]
+async fn pending_conflict_can_be_resolved_by_deleting_the_file() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let base = first.server_head.clone();
+
+    let device_a = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![upsert("Note.md", b"hello from A\n")],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a.status, SyncStatus::Ok);
+
+    let device_b = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base,
+                client_id: "device-b".to_string(),
+                changes: vec![upsert("Note.md", b"hello from B\n")],
+                ..empty_sync(first.server_head)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_b.status, SyncStatus::Conflict);
+
+    let resolved = service
+        .resolve(
+            USER,
+            VAULT,
+            ResolveRequest {
+                client_id: "device-b".to_string(),
+                device_name: "iPhone".to_string(),
+                files: vec![ResolvedFile {
+                    path: "Note.md".to_string(),
+                    content_base64: None,
+                    upload_id: None,
+                    delete: true,
+                }],
+                file_content: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, SyncStatus::Ok);
+    assert!(
+        !resolved
+            .files
+            .iter()
+            .any(|file| file_path_of(file) == "Note.md"),
+        "deleted file must not be sent back to the client"
+    );
+
+    let clone = fixture.clone_remote("deleted-check").await;
+    assert!(!clone.join("Note.md").exists());
+
+    let after = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: resolved.server_head.clone(),
+                client_id: "device-b".to_string(),
+                ..empty_sync(resolved.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status,
+        SyncStatus::Ok,
+        "no pending conflict should remain"
     );
 }
 
@@ -1544,6 +1635,13 @@ async fn response_text(response: Response<Body>) -> String {
 async fn response_json(response: Response<Body>) -> Value {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+fn file_path_of(file: &obsidian_git_sync_server::protocol::ServerFileChange) -> &str {
+    match file {
+        obsidian_git_sync_server::protocol::ServerFileChange::Upsert { path, .. } => path,
+        obsidian_git_sync_server::protocol::ServerFileChange::Delete { path } => path,
+    }
 }
 
 fn file_text(files: &[obsidian_git_sync_server::protocol::ServerFileChange], path: &str) -> String {

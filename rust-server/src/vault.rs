@@ -855,6 +855,23 @@ impl VaultService {
             let mut resolved_paths = Vec::new();
             for file in request.files {
                 let safe = validate_vault_path(&file.path)?;
+                if file.delete {
+                    if is_text_or_code_path(&safe) {
+                        let absolute = repo_path(&repo, &safe)?;
+                        match fs::remove_file(absolute).await {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    } else {
+                        let mut manifest = read_manifest(&repo).await?;
+                        if manifest.files.remove(&safe).is_some() {
+                            write_manifest(&repo, &manifest).await?;
+                        }
+                    }
+                    resolved_paths.push(safe);
+                    continue;
+                }
                 let content = self
                     .content_from_inline_or_upload(
                         &upload_root,

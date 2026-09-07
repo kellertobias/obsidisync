@@ -417,9 +417,15 @@ The server uses:
 - `git rebase origin/{branch}` for remote integration when a remote URL is configured, preserving flat history.
 - `git merge-file` for server/client text conflicts before committing.
 
-If a conflict remains, the plugin receives conflict-marker content and writes it into the file. This works on mobile because the user resolves the file inside Obsidian, then runs **Resolve current conflict file** or syncs again.
+If a conflict remains, the plugin receives conflict-marker content and writes it into the file, and the server remembers the path as pending until this device resolves it. The **Resolve sync conflicts** dialog opens automatically after such a sync and lists every conflicted file:
 
-The sidebar file-history view shows a **Resolve** action next to **Sync** when the current file contains conflict markers. Closing the resolver refreshes open ObsidiSync history views and the mobile sync indicator.
+- Each file offers **Server**, **Local**, or **Merge…** (a per-change editor with side-by-side previews and a free-text field). Resolving one file moves straight on to the next one.
+- With several files, **Use server version for all** / **Use local version for all** resolves every file with text markers in one request.
+- A file that was deleted locally while the server still waits for it can be removed on the server (**Delete on server**) or restored from the latest server version.
+- A file without usable markers (binary, or already cleaned up by hand) is pushed as-is with **Use current content**.
+- Markers written by git itself during a server-side rebase are recognised for server-reported files, labelled with git's own side names.
+
+Closing the dialog keeps the conflicts; the next automatic sync shows the clickable conflict notice again but does not force the dialog back open until the set of conflicts changes. Reopen it from the sync menu, the **Open conflict resolver** command, or the **Resolve** action in the sidebar file-history view. Closing the resolver refreshes open ObsidiSync history views and the mobile sync indicator.
 
 ## Backup and restore
 

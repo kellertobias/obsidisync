@@ -111,6 +111,8 @@ export interface ResolveRequest {
     path: string;
     contentBase64?: string;
     uploadId?: string;
+    /** Resolve the conflict by removing the file on the server. */
+    delete?: boolean;
   }>;
   fileContent?: FileContentMode;
 }

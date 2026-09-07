@@ -45,3 +45,24 @@ test("hasConflictMarkers detects a real server-generated conflict document", () 
   const realConflict = "<<<<<<< server\nremote\n=======\nlocal\n>>>>>>> client\n";
   assert.equal(hasConflictMarkers(realConflict), true);
 });
+
+test("conflict parser accepts git-style markers only when explicitly allowed", () => {
+  const rebaseConflict = "top\n<<<<<<< HEAD\nremote branch\n=======\npending sync\n>>>>>>> 1234abc (sync: iPhone)\nbottom\n";
+  assert.equal(parseConflictDocument(rebaseConflict), null);
+
+  const parsed = parseConflictDocument(rebaseConflict, { allowGenericMarkers: true });
+  assert.ok(parsed);
+  assert.equal(parsed.generic, true);
+  assert.equal(parsed.hunks[0].serverLabel, "HEAD");
+  assert.equal(parsed.hunks[0].localLabel, "1234abc (sync: iPhone)");
+  assert.equal(buildResolvedText(parsed, () => ({ side: "server" })), "top\nremote branch\nbottom\n");
+  assert.equal(buildResolvedText(parsed, () => ({ side: "local" })), "top\npending sync\nbottom\n");
+});
+
+test("conflict parser reports server/client markers as non-generic with their labels", () => {
+  const parsed = parseConflictDocument("<<<<<<< server\nremote\n=======\nlocal\n>>>>>>> client\n", { allowGenericMarkers: true });
+  assert.ok(parsed);
+  assert.equal(parsed.generic, false);
+  assert.equal(parsed.hunks[0].serverLabel, "server");
+  assert.equal(parsed.hunks[0].localLabel, "client");
+});
