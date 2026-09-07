@@ -280,6 +280,17 @@ impl DevicePasswordStore {
     /// password identifies the device. Records last use at most every few minutes.
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<DeviceGrant> {
         let user = normalize_user_claim(username).map_err(|_| anyhow!("unauthorized"))?;
+        self.authenticate_inner(Some(&user), password).await
+    }
+
+    /// Verifies a device password presented on its own, as a bearer token. Nextcloud clients
+    /// send app passwords this way; the password alone identifies the device because every
+    /// password is server-generated with ~100 bits of entropy.
+    pub async fn authenticate_bearer(&self, password: &str) -> Result<DeviceGrant> {
+        self.authenticate_inner(None, password).await
+    }
+
+    async fn authenticate_inner(&self, user: Option<&str>, password: &str) -> Result<DeviceGrant> {
         let password_hash = hash_password(password.trim());
         let _guard = self.lock.lock().await;
         let mut store = self.read_store().await?;
@@ -288,7 +299,8 @@ impl DevicePasswordStore {
             .passwords
             .iter_mut()
             .find(|record| {
-                record.user == user && constant_time_eq(&record.password_hash, &password_hash)
+                user.is_none_or(|user| record.user == user)
+                    && constant_time_eq(&record.password_hash, &password_hash)
             })
             .ok_or_else(|| anyhow!("unauthorized"))?;
         let grant = DeviceGrant {

@@ -244,19 +244,28 @@ pub async fn authenticate_device(
     headers: &HeaderMap,
     client_ip: &str,
 ) -> Result<DeviceGrant, DavError> {
-    let (username, password) = basic_credentials(headers).ok_or_else(DavError::unauthorized)?;
+    let credentials = basic_credentials(headers)
+        .map(|(username, password)| (Some(username), password))
+        .or_else(|| bearer_credential(headers).map(|password| (None, password)))
+        .ok_or_else(DavError::unauthorized)?;
+    let (username, password) = credentials;
     let throttle_keys = [
         AuthThrottle::ip_key(client_ip),
-        AuthThrottle::user_key(&username),
+        AuthThrottle::user_key(username.as_deref().unwrap_or("bearer")),
     ];
     if let Some(retry_after) = state.webdav_throttle.blocked_for(&throttle_keys).await {
         return Err(DavError::too_many_requests(retry_after));
     }
-    match state
-        .device_passwords
-        .authenticate(&username, &password)
-        .await
-    {
+    let result = match &username {
+        Some(username) => {
+            state
+                .device_passwords
+                .authenticate(username, &password)
+                .await
+        }
+        None => state.device_passwords.authenticate_bearer(&password).await,
+    };
+    match result {
         Ok(grant) => {
             state.webdav_throttle.record_success(&throttle_keys).await;
             Ok(grant)
@@ -404,6 +413,16 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     let decoded = String::from_utf8(decoded).ok()?;
     let (username, password) = decoded.split_once(':')?;
     Some((username.to_string(), password.to_string()))
+}
+
+/// Nextcloud app passwords are also sent as `Authorization: Bearer <password>`.
+fn bearer_credential(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let token = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))?
+        .trim();
+    (!token.is_empty()).then(|| token.to_string())
 }
 
 fn decode_path_segments(raw_path: &str, prefix: &str) -> Result<Vec<String>, DavError> {
@@ -1308,6 +1327,9 @@ mod tests {
         );
         headers.insert(header::AUTHORIZATION, "Bearer x".parse().unwrap());
         assert_eq!(basic_credentials(&headers), None);
+        assert_eq!(bearer_credential(&headers).as_deref(), Some("x"));
+        headers.insert(header::AUTHORIZATION, "Bearer   ".parse().unwrap());
+        assert_eq!(bearer_credential(&headers), None);
     }
 
     #[test]
