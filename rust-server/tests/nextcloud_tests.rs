@@ -362,6 +362,39 @@ async fn login_flow_issues_a_saber_device_password() {
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
+    // The nextcloud client library prefers sending the app password as a bearer token.
+    let bearer = format!("Bearer {app_password}");
+    let response = request(
+        &app,
+        "GET",
+        "/ocs/v2.php/cloud/user",
+        Some(&bearer),
+        &[],
+        vec![],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = request(
+        &app,
+        "PROPFIND",
+        "/remote.php/webdav/",
+        Some(&bearer),
+        &[("depth", "1")],
+        vec![],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::MULTI_STATUS);
+    let response = request(
+        &app,
+        "GET",
+        "/ocs/v2.php/cloud/user",
+        Some("Bearer nope"),
+        &[],
+        vec![],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
     let response = request(
         &app,
         "GET",
