@@ -42,6 +42,10 @@ pub const DEFAULT_PDF_FOLDER: &str = "Tablet";
 /// Nextcloud version reported by `status.php`; Saber does not check it, but the client library
 /// wants something parseable.
 const FAKE_NEXTCLOUD_VERSION: &str = "29.0.0.0";
+const FAKE_NEXTCLOUD_VERSION_STRING: &str = "29.0.0";
+/// Reported storage quota. Saber shows "used of total"; without a sensible total it displays
+/// "0 B of 0 B (100%)". Nextcloud's `-3` quota code means unlimited.
+const FAKE_QUOTA_TOTAL_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 
 /// In-memory Login Flow v2 state. Flows are short-lived and only meaningful to the process
 /// that created them.
@@ -185,7 +189,7 @@ async fn status() -> Json<serde_json::Value> {
         "maintenance": false,
         "needsDbUpgrade": false,
         "version": FAKE_NEXTCLOUD_VERSION,
-        "versionstring": FAKE_NEXTCLOUD_VERSION.trim_end_matches(".0"),
+        "versionstring": FAKE_NEXTCLOUD_VERSION_STRING,
         "edition": "",
         "productname": "ObsidiSync",
         "extendedSupport": false
@@ -478,7 +482,13 @@ async fn ocs_user(
                 "display-name": grant.user,
                 "email": serde_json::Value::Null,
                 "enabled": true,
-                "quota": { "free": 0, "used": 0, "total": 0, "relative": 0, "quota": -3 },
+                "quota": {
+                    "free": FAKE_QUOTA_TOTAL_BYTES,
+                    "used": 0,
+                    "total": FAKE_QUOTA_TOTAL_BYTES,
+                    "relative": 0,
+                    "quota": -3
+                },
                 "language": "en",
                 "locale": "en",
                 "storageLocation": "",
@@ -515,7 +525,7 @@ async fn ocs_capabilities() -> Json<serde_json::Value> {
             "data": {
                 "version": {
                     "major": major, "minor": minor, "micro": micro,
-                    "string": FAKE_NEXTCLOUD_VERSION.trim_end_matches(".0"),
+                    "string": FAKE_NEXTCLOUD_VERSION_STRING,
                     "edition": "", "extendedSupport": false
                 },
                 "capabilities": {

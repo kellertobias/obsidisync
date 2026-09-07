@@ -203,6 +203,7 @@ async fn status_and_capabilities_look_like_nextcloud() {
     let body = json(response).await;
     assert_eq!(body["installed"], true);
     assert_eq!(body["productname"], "ObsidiSync");
+    assert_eq!(body["versionstring"], "29.0.0");
 
     let response = request(
         &app,
@@ -351,6 +352,7 @@ async fn login_flow_issues_a_saber_device_password() {
     assert_eq!(response.status(), StatusCode::OK);
     let user = json(response).await;
     assert_eq!(user["ocs"]["data"]["id"], "alice");
+    assert!(user["ocs"]["data"]["quota"]["total"].as_u64().unwrap() > 0);
     let response = request(
         &app,
         "GET",
