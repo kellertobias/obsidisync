@@ -1,0 +1,5 @@
+# Debug builds of the server keep large async state machines on the stack; the default 2 MiB
+# thread stack overflows in some integration tests (seen on the Linux CI runner). Applies to
+# test binaries and `cargo run`; the release binary sizes its own runtime threads in main.rs.
+[env]
+RUST_MIN_STACK = "8388608"

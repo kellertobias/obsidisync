@@ -10,8 +10,19 @@ use obsidian_git_sync_server::vault::{VaultService, VaultServiceOptions};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Worker threads get a larger stack than tokio's 2 MiB default: the sync and Saber code paths
+/// build deep async state machines, and a debug build overflowed the default in tests.
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
