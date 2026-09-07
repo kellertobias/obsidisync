@@ -8,6 +8,7 @@
 use crate::auth::normalize_user_claim;
 use crate::paths::{sanitize_commit_component, validate_slug, validate_vault_path};
 use crate::time_format::{rfc3339_from_unix, unix_now};
+use crate::vault::dav::DavDevice;
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -46,6 +47,34 @@ struct DevicePasswordRecord {
     created_at: u64,
     #[serde(default)]
     last_used_at: Option<u64>,
+    #[serde(default)]
+    kind: DeviceKind,
+    /// Only for `DeviceKind::Saber`. Carries the Saber encryption password in clear text: the
+    /// server needs it to decrypt notes, so it must be recoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saber: Option<SaberSettings>,
+}
+
+/// What kind of client the password was issued to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum DeviceKind {
+    /// A plain WebDAV client using `/dav/{vault}/{folder}/`.
+    #[default]
+    Webdav,
+    /// The Saber app talking to the emulated Nextcloud endpoints. Its folder is exposed as
+    /// `Saber/` under `/remote.php/webdav/`.
+    Saber,
+}
+
+/// Settings that let the server turn Saber's encrypted uploads into PDFs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SaberSettings {
+    /// The user's Saber encryption password. Empty means "do not decrypt, just store".
+    pub encryption_password: String,
+    /// Vault folder that receives the rendered PDFs, mirroring Saber's own folder tree.
+    pub pdf_folder: String,
 }
 
 /// Public view of a device password. Never carries the secret.
@@ -60,6 +89,20 @@ pub struct DevicePasswordEntry {
     pub webdav_path: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub kind: DeviceKind,
+    /// Folder that receives rendered PDFs, for Saber devices that decrypt on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_folder: Option<String>,
+}
+
+/// Everything needed to issue a password to the Saber app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSaberDevice {
+    pub label: String,
+    pub folder: String,
+    pub pdf_folder: String,
+    pub encryption_password: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +129,25 @@ pub struct DeviceGrant {
     pub vault: String,
     pub folder: String,
     pub label: String,
+    pub kind: DeviceKind,
+    pub saber: Option<SaberSettings>,
+}
+
+impl DeviceGrant {
+    /// How this device shows up in commit subjects and the device registry.
+    pub fn dav_device(&self) -> DavDevice {
+        DavDevice {
+            client_id: format!("webdav-{}", self.id),
+            name: self.label.clone(),
+        }
+    }
+
+    /// Saber settings when the server should decrypt and render this device's uploads.
+    pub fn saber_rendering(&self) -> Option<&SaberSettings> {
+        self.saber
+            .as_ref()
+            .filter(|settings| !settings.encryption_password.is_empty())
+    }
 }
 
 impl DevicePasswordStore {
@@ -106,7 +168,55 @@ impl DevicePasswordStore {
         let vault = validate_slug(vault, "vault")?;
         let folder = validate_device_folder(&request.folder)?;
         let label = validate_label(&request.label)?;
+        self.insert(user, vault, folder, label, DeviceKind::Webdav, None)
+            .await
+    }
 
+    /// Issues a password for the Saber app. The PDF folder must not lie inside the sync folder,
+    /// otherwise rendered PDFs would land in Saber's own tree. The sync folder may live inside
+    /// the PDF folder (the default layout keeps both under one `Saber` folder).
+    pub async fn create_saber(
+        &self,
+        user: &str,
+        vault: &str,
+        request: CreateSaberDevice,
+    ) -> Result<CreatedDevicePassword> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let folder = validate_device_folder(&request.folder)?;
+        let label = validate_label(&request.label)?;
+        let pdf_folder = validate_device_folder(&request.pdf_folder)
+            .map_err(|error| anyhow!("{error} (PDF folder)"))?;
+        if pdf_folder == folder || pdf_folder.starts_with(&format!("{folder}/")) {
+            bail!("invalid request: the PDF folder must be separate from the Saber sync folder");
+        }
+        let encryption_password = request.encryption_password.trim().to_string();
+        if encryption_password.len() > 512 {
+            bail!("invalid request: encryption password is too long");
+        }
+        self.insert(
+            user,
+            vault,
+            folder,
+            label,
+            DeviceKind::Saber,
+            Some(SaberSettings {
+                encryption_password,
+                pdf_folder,
+            }),
+        )
+        .await
+    }
+
+    async fn insert(
+        &self,
+        user: String,
+        vault: String,
+        folder: String,
+        label: String,
+        kind: DeviceKind,
+        saber: Option<SaberSettings>,
+    ) -> Result<CreatedDevicePassword> {
         let _guard = self.lock.lock().await;
         let mut store = self.read_store().await?;
         if store
@@ -128,6 +238,8 @@ impl DevicePasswordStore {
             password_hash: hash_password(&password),
             created_at: unix_now(),
             last_used_at: None,
+            kind,
+            saber,
         };
         let entry = record.public_entry();
         store.passwords.push(record);
@@ -185,6 +297,8 @@ impl DevicePasswordStore {
             vault: record.vault.clone(),
             folder: record.folder.clone(),
             label: record.label.clone(),
+            kind: record.kind,
+            saber: record.saber.clone(),
         };
         let should_record = record
             .last_used_at
@@ -227,6 +341,8 @@ impl DevicePasswordRecord {
             webdav_path: webdav_path(&self.vault, &self.folder),
             created_at: rfc3339_from_unix(self.created_at),
             last_used_at: self.last_used_at.map(rfc3339_from_unix),
+            kind: self.kind,
+            pdf_folder: self.saber.as_ref().map(|saber| saber.pdf_folder.clone()),
         }
     }
 }

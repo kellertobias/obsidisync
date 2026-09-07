@@ -167,6 +167,8 @@ export interface ServerInfoResponse {
   features?: string[];
 }
 
+export type DeviceKind = "webdav" | "saber";
+
 export interface DevicePasswordEntry {
   id: string;
   label: string;
@@ -176,6 +178,10 @@ export interface DevicePasswordEntry {
   webdavPath: string;
   createdAt: string;
   lastUsedAt: string | null;
+  /** Absent on servers that predate Saber support; treated as a plain WebDAV device. */
+  kind?: DeviceKind;
+  /** Where a Saber device's rendered PDFs are written, when the server decrypts its notes. */
+  pdfFolder?: string;
 }
 
 export interface CreateDevicePasswordRequest {

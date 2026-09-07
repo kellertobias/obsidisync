@@ -349,6 +349,29 @@ Files uploaded over WebDAV are committed to the vault repository under the devic
 
 The endpoint implements WebDAV class 1 (`OPTIONS`, `PROPFIND` with depth 0 or 1, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`) plus advisory `LOCK`/`UNLOCK` so class 2 clients such as macOS Finder or Windows Explorer work too. Downloads support single byte ranges (`Range: bytes=...`) for PDF viewers that read files in place. Uploads are streamed to disk, so large PDFs do not have to fit into server memory, and are limited by `OBSIDIAN_GIT_SYNC_WEBDAV_MAX_BODY_BYTES` (default 200 MB). If the server sits behind a reverse proxy, raise its request body limit for `/dav/` as well (for nginx, `client_max_body_size`; its default of 1 MB rejects most PDF uploads with `413`). Re-uploading an unchanged file is a no-op and does not create a new version.
 
+### Saber handwritten notes (Nextcloud emulation)
+
+[Saber](https://github.com/saber-notes/saber) is an open-source handwriting app that syncs through Nextcloud with end-to-end encryption. ObsidiSync can stand in for that Nextcloud server: Saber logs in against the sync server, uploads its encrypted notes into one vault folder (so all Saber devices stay in sync through the server), and — if you trust the server with your Saber encryption password — the server decrypts each note and writes a PDF next to it in the vault, refreshed every time the note changes. The PDFs open in Obsidian like any other attachment.
+
+To connect Saber:
+
+1. Log in with the plugin on any client and sync the vault at least once.
+2. In Saber, open **Settings → Log in** and choose **Log in with Nextcloud**. Enter the sync server URL (for example `https://sync.example.com`) and start the login. Saber opens a browser page served by ObsidiSync.
+3. On that page, sign in with your ObsidiSync password (or paste an access token on OIDC/token servers), then pick the vault, a device name, the **sync folder** for Saber's encrypted files (default `Saber/Sync`), the **PDF folder** for rendered notes (default `Saber`), and enter the **Saber encryption password** you are going to use. Leave the encryption password empty to only store the encrypted files without PDFs.
+4. Click **Connect**. Saber picks up the login automatically (the page also offers an "Open Saber" button and the generated password for manual entry). Saber then asks for the encryption password; enter the same one as in step 3.
+
+Saber's notes land as encrypted `.sbe` files in the sync folder, exactly as they would on Nextcloud, so a second Saber device connected the same way stays in sync. The server renders `Uni/Lecture 1.sbn2` from Saber to `Saber/Uni/Lecture 1.pdf` (mirroring Saber's folder tree under the PDF folder) about two seconds after the last upload of a note, and deletes the PDF when the note is deleted in Saber. Rendered PDFs are committed under the device name and show up in file history and on every Obsidian client after its next sync.
+
+The connection appears in **Settings → ObsidiSync → Device passwords (WebDAV)** like any other device and can be revoked there. Saber's own "Log in with Saber" button uses the app author's public Nextcloud and is not affected.
+
+What the renderer draws: page background colour and ruling (lined, college, grid, dots, staffs, tablature, Cornell), fountain pen, ballpoint and shape-pen strokes with pressure, pencil strokes (as lighter fills), highlighter strokes (translucent), PNG/JPEG images, and typed text as plain Helvetica. Pages of imported PDFs and SVG images are drawn as labelled placeholders. Notes in Saber's legacy `.sbn` JSON format are stored but not rendered.
+
+Security notes:
+
+- The Saber encryption password is stored in clear text in `OBSIDIAN_GIT_SYNC_DATA_DIR/auth/device-passwords.json` next to the hashed device password, because the server needs it to decrypt notes. Anyone with access to that file can read your Saber notes. Use a password that is only used for Saber, or leave it empty to keep end-to-end encryption and skip PDFs.
+- The emulated Nextcloud endpoints (`/status.php`, `/index.php/login/v2`, `/ocs/v2.php/cloud/user`, `/remote.php/webdav/`, `/remote.php/dav/files/{user}/`) accept only device passwords and are throttled like `/dav/`. Under `/remote.php/webdav/` a device sees exactly one folder, `Saber/`, which is its granted sync folder.
+- When the server sits behind a reverse proxy it must forward `Host` (or `X-Forwarded-Host`) and `X-Forwarded-Proto`; the login flow uses them to build the URLs it hands to Saber.
+
 ### First sync
 
 The first time a vault syncs with the server, the plugin does not merge automatically. Instead it asks how to reconcile the local vault with whatever is already on the server:

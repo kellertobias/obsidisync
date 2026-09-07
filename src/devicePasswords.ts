@@ -4,9 +4,21 @@ import { assertSafeVaultPath } from "./security";
 
 export const DEFAULT_DEVICE_FOLDER = "Tablet";
 export const DEVICE_PASSWORDS_FEATURE = "webdavDevicePasswords";
+/** Servers that emulate Nextcloud for the Saber handwriting app. */
+export const SABER_NEXTCLOUD_FEATURE = "saberNextcloud";
 
 export function serverSupportsDevicePasswords(info: Pick<ServerInfoResponse, "features">): boolean {
   return Array.isArray(info.features) && info.features.includes(DEVICE_PASSWORDS_FEATURE);
+}
+
+export function serverSupportsSaber(info: Pick<ServerInfoResponse, "features">): boolean {
+  return Array.isArray(info.features) && info.features.includes(SABER_NEXTCLOUD_FEATURE);
+}
+
+/** Saber devices log in through the server's Nextcloud emulation, not the `/dav/` tree. */
+export function deviceUrl(entry: DevicePasswordEntry, serverUrl: string): string {
+  if (entry.kind === "saber") return serverUrl.trim().replace(/\/+$/, "");
+  return webdavUrl(serverUrl, entry.webdavPath);
 }
 
 /**
@@ -47,6 +59,10 @@ export function webdavUrl(serverUrl: string, webdavPath: string): string {
 export function describeDevicePassword(entry: DevicePasswordEntry, serverUrl: string): string {
   const created = formatDate(entry.createdAt);
   const lastUsed = entry.lastUsedAt ? formatDate(entry.lastUsedAt) : "never";
+  if (entry.kind === "saber") {
+    const pdfs = entry.pdfFolder ? `PDFs in ${entry.pdfFolder}` : "encrypted files only, no PDFs";
+    return `Saber app (Nextcloud login at ${deviceUrl(entry, serverUrl)}) · syncs to ${entry.folder} · ${pdfs} · created ${created} · last used ${lastUsed}`;
+  }
   return `${webdavUrl(serverUrl, entry.webdavPath)} · created ${created} · last used ${lastUsed}`;
 }
 

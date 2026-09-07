@@ -1,6 +1,6 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 import type { ButtonComponent } from "obsidian";
-import { DEFAULT_DEVICE_FOLDER, describeDevicePassword, normalizeDeviceFolder, webdavUrl } from "./devicePasswords";
+import { DEFAULT_DEVICE_FOLDER, describeDevicePassword, deviceUrl, normalizeDeviceFolder, webdavUrl } from "./devicePasswords";
 import { GitService } from "./gitService";
 import { CreatedDevicePassword } from "./protocol";
 
@@ -32,6 +32,11 @@ export class DevicePasswordsModal extends Modal {
         "Give an e-ink tablet or another WebDAV client access to one folder of this vault. " +
         "Each device gets its own password that you can revoke at any time. " +
         "Files the device uploads appear in Obsidian after the next sync."
+    });
+    contentEl.createEl("p", {
+      text:
+        "Using the Saber handwriting app? Do not create a password here: in Saber choose \"Log in with Nextcloud\", " +
+        "enter this sync server's URL, and finish the login in the browser. The device then appears in this list."
     });
 
     if (this.gitService.loginStatus().state !== "logged-in") {
@@ -148,8 +153,8 @@ export class DevicePasswordsModal extends Modal {
           .setDesc(describeDevicePassword(entry, this.serverUrl))
           .addButton((button) =>
             button.setButtonText("Copy URL").onClick(async () => {
-              await navigator.clipboard.writeText(webdavUrl(this.serverUrl, entry.webdavPath));
-              new Notice("WebDAV URL copied");
+              await navigator.clipboard.writeText(deviceUrl(entry, this.serverUrl));
+              new Notice(entry.kind === "saber" ? "Server URL for Saber copied" : "WebDAV URL copied");
             })
           )
           .addButton((button) =>

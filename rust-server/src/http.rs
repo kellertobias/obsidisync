@@ -3,7 +3,9 @@ use crate::auth_throttle::AuthThrottle;
 use crate::device_passwords::{
     CreateDevicePasswordRequest, CreatedDevicePassword, DevicePasswordEntry, DevicePasswordStore,
 };
+use crate::nextcloud::LoginFlowStore;
 use crate::protocol::*;
+use crate::saber::sync::{SaberRenderer, DEFAULT_RENDER_DELAY};
 use crate::vault::VaultService;
 use axum::extract::{DefaultBodyLimit, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
@@ -20,7 +22,11 @@ const SERVER_API_VERSION: u32 = 1;
 const MIN_CLIENT_API_VERSION: u32 = 1;
 /// Optional capabilities advertised to clients. Older plugins ignore the list; newer plugins
 /// hide or explain features that the server they talk to does not have yet.
-const SERVER_FEATURES: &[&str] = &["webdavDevicePasswords", "syncFileReferences"];
+const SERVER_FEATURES: &[&str] = &[
+    "webdavDevicePasswords",
+    "syncFileReferences",
+    "saberNextcloud",
+];
 /// PDFs exported from note-taking tablets are routinely larger than the JSON sync payload limit.
 pub const DEFAULT_WEBDAV_MAX_BODY_BYTES: usize = 200 * 1024 * 1024;
 
@@ -33,11 +39,16 @@ pub struct AppState {
     pub webdav_throttle: Arc<AuthThrottle>,
     /// Largest single WebDAV upload. Enforced while streaming the body to disk.
     pub webdav_max_body_bytes: usize,
+    /// Renders Saber uploads to PDFs in the background.
+    pub saber: Arc<SaberRenderer>,
+    /// Pending Nextcloud Login Flow v2 sessions started by the Saber app.
+    pub login_flows: Arc<LoginFlowStore>,
 }
 
 impl AppState {
     pub fn new(vaults: VaultService, auth: AuthVerifier, public_auth: PublicAuthConfig) -> Self {
         let device_passwords = Arc::new(DevicePasswordStore::new(vaults.data_dir.clone()));
+        let saber = SaberRenderer::new(vaults.clone(), DEFAULT_RENDER_DELAY);
         Self {
             vaults,
             auth,
@@ -45,7 +56,15 @@ impl AppState {
             device_passwords,
             webdav_throttle: Arc::new(AuthThrottle::new()),
             webdav_max_body_bytes: DEFAULT_WEBDAV_MAX_BODY_BYTES,
+            saber,
+            login_flows: Arc::new(LoginFlowStore::default()),
         }
+    }
+
+    /// Changes how long the Saber renderer waits for related uploads before rendering.
+    pub fn with_saber_render_delay(mut self, delay: std::time::Duration) -> Self {
+        self.saber = SaberRenderer::new(self.vaults.clone(), delay);
+        self
     }
 }
 
@@ -220,6 +239,7 @@ pub fn router_with_webdav_limit(
         )
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .merge(webdav)
+        .merge(crate::nextcloud::router())
         .with_state(Arc::new(state));
 
     apply_cors(router, allowed_origins)
@@ -303,6 +323,23 @@ struct PasswordLoginForm {
     password: String,
     password_confirm: Option<String>,
     setup_token: Option<String>,
+    /// Site-relative path to continue to after login (for example a Saber login flow page).
+    next: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LoginPageQuery {
+    next: Option<String>,
+}
+
+/// Only same-site paths are followed after login, never absolute URLs.
+fn safe_next_path(next: Option<&str>) -> Option<String> {
+    let next = next?.trim();
+    if next.starts_with('/') && !next.starts_with("//") && !next.contains(['\r', '\n']) {
+        Some(next.to_string())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,7 +354,10 @@ struct RefreshSessionRequest {
     refresh_token: String,
 }
 
-async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String>, ApiError> {
+async fn password_page(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<LoginPageQuery>,
+) -> Result<Html<String>, ApiError> {
     if !matches!(state.public_auth, PublicAuthConfig::Password) {
         return Ok(Html(render_home_page(&state.public_auth)));
     }
@@ -329,6 +369,7 @@ async fn password_page(State(state): State<Arc<AppState>>) -> Result<Html<String
         None,
         None,
         &[],
+        safe_next_path(query.next.as_deref()).as_deref(),
     )))
 }
 
@@ -355,11 +396,12 @@ async fn password_form(
             .await
     };
 
+    let next = safe_next_path(form.next.as_deref());
     match result {
         Ok(session) => {
             if configured {
                 Ok(redirect_with_site_session(
-                    "/change-feed",
+                    next.as_deref().unwrap_or("/change-feed"),
                     &session.access_token,
                     site_session_cookie_is_secure(&headers),
                 ))
@@ -371,6 +413,7 @@ async fn password_form(
                     Some(format!("Access token created for {}.", session.user)),
                     Some(session.access_token.clone()),
                     &feed,
+                    next.as_deref(),
                 ))
                 .into_response())
             }
@@ -381,6 +424,7 @@ async fn password_form(
             Some(error.to_string()),
             None,
             &[],
+            next.as_deref(),
         ))
         .into_response()),
     }
@@ -556,7 +600,16 @@ fn render_password_page(
     message: Option<String>,
     token: Option<String>,
     feed: &[ActivityFeedEntry],
+    next: Option<&str>,
 ) -> String {
+    let next_field = next
+        .map(|value| {
+            format!(
+                r#"<input type="hidden" name="next" value="{}">"#,
+                escape_html(value)
+            )
+        })
+        .unwrap_or_default();
     let title = if configured { "Log in" } else { "Set password" };
     let password_label = if configured {
         "Password"
@@ -624,6 +677,7 @@ button {{ cursor: pointer; font-weight: 700; }}
 <h1>{title}</h1>
 {message_html}
 <form action="/login" method="post">
+{next_field}
 <label>Username<input name="username" type="text" autocomplete="username" required autofocus></label>
 <label>{password_label}<input name="password" type="password" autocomplete="{autocomplete}" required></label>
 {confirm_field}
@@ -712,7 +766,7 @@ fn render_feed(feed: &[ActivityFeedEntry]) -> String {
     format!(r#"<section class="feed"><h2>Recent changes</h2>{items}</section>"#)
 }
 
-fn escape_html(value: &str) -> String {
+pub(crate) fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1033,7 +1087,7 @@ fn redirect_to_login() -> Response {
     (StatusCode::SEE_OTHER, [(header::LOCATION, "/login")]).into_response()
 }
 
-fn site_session_token(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn site_session_token(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::COOKIE)?
         .to_str()

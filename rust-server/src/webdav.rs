@@ -5,6 +5,10 @@
 //! and one folder: `/dav/{vault}/{folder}/...`. Ancestors of that folder are browsable as empty
 //! virtual collections so clients that navigate from the root still find their way; everything
 //! else is forbidden.
+//!
+//! The same handler also serves the Nextcloud-compatible tree (`/remote.php/webdav/`, see
+//! `crate::nextcloud`). There the granted folder appears as a single top-level collection named
+//! `Saber`, because that is the fixed folder name the Saber app creates on any Nextcloud.
 
 use crate::auth_throttle::AuthThrottle;
 use crate::device_passwords::{encode_path_segment, DeviceGrant};
@@ -28,6 +32,41 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 const DAV_PREFIX: &str = "/dav";
+/// Name of the virtual top-level folder on Nextcloud-style mounts. Saber hard-codes it.
+pub const NEXTCLOUD_VIRTUAL_FOLDER: &str = "Saber";
+
+/// Where a WebDAV tree is mounted and how URL paths map onto the granted folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+    /// URL prefix without trailing slash, for example `/dav` or `/remote.php/webdav`.
+    pub prefix: String,
+    pub layout: MountLayout,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountLayout {
+    /// `{prefix}/{vault}/{folder}/...`: the vault and the granted folder's ancestors are
+    /// browsable, the folder itself is writable.
+    Vault,
+    /// `{prefix}/Saber/...` maps straight onto the granted folder; nothing else exists.
+    VirtualFolder,
+}
+
+impl Mount {
+    pub fn dav() -> Self {
+        Self {
+            prefix: DAV_PREFIX.to_string(),
+            layout: MountLayout::Vault,
+        }
+    }
+
+    pub fn nextcloud(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.trim_end_matches('/').to_string(),
+            layout: MountLayout::VirtualFolder,
+        }
+    }
+}
 const ALLOWED_METHODS: &str =
     "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK";
 const LOCK_TIMEOUT_SECONDS: u64 = 3600;
@@ -35,7 +74,7 @@ const LOCK_TIMEOUT_SECONDS: u64 = 3600;
 const SMALL_BODY_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug)]
-struct DavError {
+pub struct DavError {
     status: StatusCode,
     message: String,
     headers: Vec<(HeaderName, String)>,
@@ -170,10 +209,22 @@ pub async fn handle(
     connect_info: Option<ConnectInfo<SocketAddr>>,
     request: Request,
 ) -> Response {
+    handle_mounted(&state, connect_info, request, &Mount::dav()).await
+}
+
+/// Serves a WebDAV request for any mount. Nextcloud-style routes call this with their own
+/// prefix.
+pub async fn handle_mounted(
+    state: &AppState,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+    request: Request,
+    mount: &Mount,
+) -> Response {
     let (parts, body) = request.into_parts();
     let client_ip = client_ip(&parts.headers, connect_info.map(|info| info.0));
     match handle_inner(
-        &state,
+        state,
+        mount,
         &parts.uri,
         &parts.method,
         &parts.headers,
@@ -187,8 +238,44 @@ pub async fn handle(
     }
 }
 
+/// Authenticates a request with a device password, applying the login throttle.
+pub async fn authenticate_device(
+    state: &AppState,
+    headers: &HeaderMap,
+    client_ip: &str,
+) -> Result<DeviceGrant, DavError> {
+    let (username, password) = basic_credentials(headers).ok_or_else(DavError::unauthorized)?;
+    let throttle_keys = [
+        AuthThrottle::ip_key(client_ip),
+        AuthThrottle::user_key(&username),
+    ];
+    if let Some(retry_after) = state.webdav_throttle.blocked_for(&throttle_keys).await {
+        return Err(DavError::too_many_requests(retry_after));
+    }
+    match state
+        .device_passwords
+        .authenticate(&username, &password)
+        .await
+    {
+        Ok(grant) => {
+            state.webdav_throttle.record_success(&throttle_keys).await;
+            Ok(grant)
+        }
+        Err(_) => {
+            state.webdav_throttle.record_failure(&throttle_keys).await;
+            Err(DavError::unauthorized())
+        }
+    }
+}
+
+/// The client address used for throttling: the first `X-Forwarded-For` hop, then the peer.
+pub fn client_ip_for(headers: &HeaderMap, connect_info: Option<ConnectInfo<SocketAddr>>) -> String {
+    client_ip(headers, connect_info.map(|info| info.0))
+}
+
 async fn handle_inner(
     state: &AppState,
+    mount: &Mount,
     uri: &Uri,
     method: &Method,
     headers: &HeaderMap,
@@ -199,35 +286,24 @@ async fn handle_inner(
         return Ok(options_response());
     }
 
-    let (username, password) = basic_credentials(headers).ok_or_else(DavError::unauthorized)?;
-    let throttle_keys = [
-        AuthThrottle::ip_key(client_ip),
-        AuthThrottle::user_key(&username),
-    ];
-    if let Some(retry_after) = state.webdav_throttle.blocked_for(&throttle_keys).await {
-        return Err(DavError::too_many_requests(retry_after));
-    }
-    let grant = match state
-        .device_passwords
-        .authenticate(&username, &password)
-        .await
-    {
-        Ok(grant) => {
-            state.webdav_throttle.record_success(&throttle_keys).await;
-            grant
-        }
-        Err(_) => {
-            state.webdav_throttle.record_failure(&throttle_keys).await;
-            return Err(DavError::unauthorized());
-        }
-    };
+    let grant = authenticate_device(state, headers, client_ip).await?;
 
-    let segments = decode_path_segments(uri.path())?;
-    let target = resolve_target(&grant, &segments)?;
+    let segments = decode_path_segments(uri.path(), &mount.prefix)?;
+    let target = resolve_target(mount, &grant, &segments)?;
 
     match method.as_str() {
-        "PROPFIND" => propfind(state, &grant, &target, headers).await,
-        "GET" | "HEAD" => get(state, &grant, &target, headers, method == Method::HEAD).await,
+        "PROPFIND" => propfind(state, mount, &grant, &target, headers).await,
+        "GET" | "HEAD" => {
+            get(
+                state,
+                mount,
+                &grant,
+                &target,
+                headers,
+                method == Method::HEAD,
+            )
+            .await
+        }
         "PUT" => put(state, &grant, &target, headers, body).await,
         "DELETE" => delete(state, &grant, &target).await,
         "MKCOL" => {
@@ -235,11 +311,19 @@ async fn handle_inner(
             mkcol(state, &grant, &target, &body).await
         }
         "MOVE" | "COPY" => {
-            move_or_copy(state, &grant, &target, headers, method.as_str() == "MOVE").await
+            move_or_copy(
+                state,
+                mount,
+                &grant,
+                &target,
+                headers,
+                method.as_str() == "MOVE",
+            )
+            .await
         }
-        "LOCK" => lock(&grant, &target, headers),
+        "LOCK" => lock(mount, &grant, &target, headers),
         "UNLOCK" => Ok(StatusCode::NO_CONTENT.into_response()),
-        "PROPPATCH" => proppatch(&grant, &target),
+        "PROPPATCH" => proppatch(mount, &grant, &target),
         _ => Ok((
             StatusCode::METHOD_NOT_ALLOWED,
             [(header::ALLOW, ALLOWED_METHODS)],
@@ -322,12 +406,12 @@ fn basic_credentials(headers: &HeaderMap) -> Option<(String, String)> {
     Some((username.to_string(), password.to_string()))
 }
 
-fn decode_path_segments(raw_path: &str) -> Result<Vec<String>, DavError> {
-    let rest = if raw_path == DAV_PREFIX {
+fn decode_path_segments(raw_path: &str, prefix: &str) -> Result<Vec<String>, DavError> {
+    let rest = if raw_path == prefix {
         ""
     } else {
         raw_path
-            .strip_prefix(&format!("{DAV_PREFIX}/"))
+            .strip_prefix(&format!("{prefix}/"))
             .ok_or_else(DavError::not_found)?
     };
     let mut segments = Vec::new();
@@ -347,13 +431,20 @@ fn decode_path_segments(raw_path: &str) -> Result<Vec<String>, DavError> {
     Ok(segments)
 }
 
-fn resolve_target(grant: &DeviceGrant, segments: &[String]) -> Result<Target, DavError> {
+fn resolve_target(
+    mount: &Mount,
+    grant: &DeviceGrant,
+    segments: &[String],
+) -> Result<Target, DavError> {
+    if mount.layout == MountLayout::VirtualFolder {
+        return resolve_virtual_folder_target(mount, grant, segments);
+    }
     let Some(vault) = segments.first() else {
         return Ok(Target::Ancestor {
-            href: format!("{DAV_PREFIX}/"),
+            href: format!("{}/", mount.prefix),
             name: "dav".to_string(),
             child_name: grant.vault.clone(),
-            child_href: href_for(&grant.vault, "", true),
+            child_href: href_for(mount, grant, "", true),
         });
     };
     if vault != &grant.vault {
@@ -382,20 +473,66 @@ fn resolve_target(grant: &DeviceGrant, segments: &[String]) -> Result<Target, Da
         format!("{relative}/{child_name}")
     };
     Ok(Target::Ancestor {
-        href: href_for(&grant.vault, &relative, true),
+        href: href_for(mount, grant, &relative, true),
         name: if relative.is_empty() {
             grant.vault.clone()
         } else {
             relative.rsplit('/').next().unwrap_or(&relative).to_string()
         },
         child_name,
-        child_href: href_for(&grant.vault, &child_path, true),
+        child_href: href_for(mount, grant, &child_path, true),
     })
 }
 
-fn href_for(vault: &str, path: &str, is_dir: bool) -> String {
-    let mut href = format!("{DAV_PREFIX}/{}", encode_path_segment(vault));
-    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+/// On Nextcloud-style mounts the root holds exactly one collection, `Saber`, which is the
+/// granted folder. Paths inside it are vault paths below the granted folder.
+fn resolve_virtual_folder_target(
+    mount: &Mount,
+    grant: &DeviceGrant,
+    segments: &[String],
+) -> Result<Target, DavError> {
+    let Some(first) = segments.first() else {
+        return Ok(Target::Ancestor {
+            href: format!("{}/", mount.prefix),
+            name: String::new(),
+            child_name: NEXTCLOUD_VIRTUAL_FOLDER.to_string(),
+            child_href: href_for(mount, grant, &grant.folder, true),
+        });
+    };
+    if first != NEXTCLOUD_VIRTUAL_FOLDER {
+        return Err(DavError::forbidden(
+            "forbidden: only the Saber folder is accessible with this device password",
+        ));
+    }
+    let rest = segments[1..].join("/");
+    let path = if rest.is_empty() {
+        grant.folder.clone()
+    } else {
+        format!("{}/{rest}", grant.folder)
+    };
+    Ok(Target::Inside { path })
+}
+
+fn href_for(mount: &Mount, grant: &DeviceGrant, path: &str, is_dir: bool) -> String {
+    let mut href = mount.prefix.clone();
+    let relative: &str = match mount.layout {
+        MountLayout::Vault => {
+            href.push('/');
+            href.push_str(&encode_path_segment(&grant.vault));
+            path
+        }
+        MountLayout::VirtualFolder => {
+            href.push('/');
+            href.push_str(NEXTCLOUD_VIRTUAL_FOLDER);
+            if path == grant.folder {
+                ""
+            } else {
+                path.strip_prefix(&format!("{}/", grant.folder))
+                    .unwrap_or(path)
+            }
+        }
+    };
+    for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
         href.push('/');
         href.push_str(&encode_path_segment(segment));
     }
@@ -406,9 +543,14 @@ fn href_for(vault: &str, path: &str, is_dir: bool) -> String {
 }
 
 fn device_for(grant: &DeviceGrant) -> DavDevice {
-    DavDevice {
-        client_id: format!("webdav-{}", grant.id),
-        name: grant.label.clone(),
+    grant.dav_device()
+}
+
+/// Hands changed paths to the Saber renderer when the device is a Saber app whose notes the
+/// server can decrypt.
+fn notify_saber(state: &AppState, grant: &DeviceGrant, paths: Vec<String>) {
+    if grant.saber_rendering().is_some() {
+        state.saber.schedule(grant, paths);
     }
 }
 
@@ -439,6 +581,7 @@ async fn stat_or_virtual(
 
 async fn propfind(
     state: &AppState,
+    mount: &Mount,
     grant: &DeviceGrant,
     target: &Target,
     headers: &HeaderMap,
@@ -486,11 +629,13 @@ async fn propfind(
                 .ok_or_else(DavError::not_found)?;
             let name = if path.is_empty() {
                 grant.vault.clone()
+            } else if mount.layout == MountLayout::VirtualFolder && *path == grant.folder {
+                NEXTCLOUD_VIRTUAL_FOLDER.to_string()
             } else {
                 entry.name().to_string()
             };
             responses.push(render_response(
-                &href_for(&grant.vault, path, entry.is_dir),
+                &href_for(mount, grant, path, entry.is_dir),
                 &name,
                 &entry,
             ));
@@ -501,7 +646,7 @@ async fn propfind(
                     .await?
                 {
                     responses.push(render_response(
-                        &href_for(&grant.vault, &child.path, child.is_dir),
+                        &href_for(mount, grant, &child.path, child.is_dir),
                         child.name(),
                         &child,
                     ));
@@ -555,6 +700,7 @@ fn render_response(href: &str, name: &str, entry: &DavEntry) -> String {
 
 async fn get(
     state: &AppState,
+    mount: &Mount,
     grant: &DeviceGrant,
     target: &Target,
     headers: &HeaderMap,
@@ -569,7 +715,7 @@ async fn get(
             .vaults
             .dav_list(&grant.user, &grant.vault, path)
             .await?;
-        let listing = render_directory_listing(&grant.vault, path, &children);
+        let listing = render_directory_listing(mount, grant, path, &children);
         return Ok((
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -706,15 +852,43 @@ async fn put(
         let _ = tokio::fs::remove_file(&staged).await;
         return Err(error);
     }
+    let client_mtime = client_mtime_millis(headers);
     let created = state
         .vaults
-        .dav_write_from_file(&grant.user, &grant.vault, path, &staged, &device_for(grant))
+        .dav_write_from_file(
+            &grant.user,
+            &grant.vault,
+            path,
+            &staged,
+            client_mtime,
+            &device_for(grant),
+        )
         .await?;
-    Ok(if created {
-        StatusCode::CREATED.into_response()
+    notify_saber(state, grant, vec![path.to_string()]);
+    let status = if created {
+        StatusCode::CREATED
     } else {
-        StatusCode::NO_CONTENT.into_response()
-    })
+        StatusCode::NO_CONTENT
+    };
+    let mut response = status.into_response();
+    if client_mtime.is_some() {
+        // Nextcloud's acknowledgement; clients that sent the header expect it back.
+        response.headers_mut().insert(
+            HeaderName::from_static("x-oc-mtime"),
+            HeaderValue::from_static("accepted"),
+        );
+    }
+    Ok(response)
+}
+
+/// Nextcloud clients send the file's own modification time as `X-OC-Mtime` (Unix seconds).
+fn client_mtime_millis(headers: &HeaderMap) -> Option<i64> {
+    let value = headers.get("x-oc-mtime")?.to_str().ok()?.trim();
+    let seconds: f64 = value.parse().ok()?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some((seconds * 1000.0).round() as i64)
 }
 
 async fn delete(
@@ -732,6 +906,7 @@ async fn delete(
         .vaults
         .dav_delete(&grant.user, &grant.vault, path, &device_for(grant))
         .await?;
+    notify_saber(state, grant, vec![path.to_string()]);
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -776,6 +951,7 @@ async fn mkcol(
 
 async fn move_or_copy(
     state: &AppState,
+    mount: &Mount,
     grant: &DeviceGrant,
     target: &Target,
     headers: &HeaderMap,
@@ -792,8 +968,8 @@ async fn move_or_copy(
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| DavError::bad_request("Destination header is required"))?;
     let destination_path = destination_request_path(destination)?;
-    let segments = decode_path_segments(&destination_path)?;
-    let to = match resolve_target(grant, &segments)? {
+    let segments = decode_path_segments(&destination_path, &mount.prefix)?;
+    let to = match resolve_target(mount, grant, &segments)? {
         Target::Inside { path } => path,
         Target::Ancestor { .. } => {
             return Err(DavError::forbidden(
@@ -822,6 +998,7 @@ async fn move_or_copy(
             &device_for(grant),
         )
         .await?;
+    notify_saber(state, grant, vec![from.to_string(), to]);
     Ok(if created {
         StatusCode::CREATED.into_response()
     } else {
@@ -839,7 +1016,12 @@ fn destination_request_path(destination: &str) -> Result<String, DavError> {
     Ok(url.path().to_string())
 }
 
-fn lock(grant: &DeviceGrant, target: &Target, headers: &HeaderMap) -> Result<Response, DavError> {
+fn lock(
+    mount: &Mount,
+    grant: &DeviceGrant,
+    target: &Target,
+    headers: &HeaderMap,
+) -> Result<Response, DavError> {
     // Advisory only: the token is never enforced, but returning one lets class 2 clients
     // (macOS Finder, Windows Explorer, some sync apps) proceed with their lock-then-write flow.
     let path = inside_path(target)?;
@@ -856,7 +1038,7 @@ fn lock(grant: &DeviceGrant, target: &Target, headers: &HeaderMap) -> Result<Res
         })
         .map(|seconds| seconds.min(LOCK_TIMEOUT_SECONDS))
         .unwrap_or(LOCK_TIMEOUT_SECONDS);
-    let href = href_for(&grant.vault, path, false);
+    let href = href_for(mount, grant, path, false);
     let body = format!(
         r#"<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope><D:depth>0</D:depth><D:timeout>Second-{timeout}</D:timeout><D:locktoken><D:href>{token}</D:href></D:locktoken><D:lockroot><D:href>{}</D:href></D:lockroot></D:activelock></D:lockdiscovery></D:prop>"#,
         escape_xml(&href)
@@ -878,11 +1060,11 @@ fn lock(grant: &DeviceGrant, target: &Target, headers: &HeaderMap) -> Result<Res
         .into_response())
 }
 
-fn proppatch(grant: &DeviceGrant, target: &Target) -> Result<Response, DavError> {
+fn proppatch(mount: &Mount, grant: &DeviceGrant, target: &Target) -> Result<Response, DavError> {
     // Property changes (typically a client trying to set the modification time) are accepted
     // and ignored; the vault's own metadata is authoritative.
     let path = inside_path(target)?;
-    let href = href_for(&grant.vault, path, false);
+    let href = href_for(mount, grant, path, false);
     Ok(multistatus(vec![format!(
         "<D:response><D:href>{}</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>",
         escape_xml(&href)
@@ -904,13 +1086,18 @@ fn random_lock_token() -> Result<String, DavError> {
     ))
 }
 
-fn render_directory_listing(vault: &str, path: &str, children: &[DavEntry]) -> String {
+fn render_directory_listing(
+    mount: &Mount,
+    grant: &DeviceGrant,
+    path: &str,
+    children: &[DavEntry],
+) -> String {
     let items = children
         .iter()
         .map(|child| {
             format!(
                 r#"<li><a href="{}">{}{}</a></li>"#,
-                escape_xml(&href_for(vault, &child.path, child.is_dir)),
+                escape_xml(&href_for(mount, grant, &child.path, child.is_dir)),
                 escape_xml(child.name()),
                 if child.is_dir { "/" } else { "" }
             )
@@ -970,27 +1157,76 @@ mod tests {
             vault: "notes".to_string(),
             folder: "Tablet/Notes".to_string(),
             label: "Boox".to_string(),
+            kind: crate::device_passwords::DeviceKind::Webdav,
+            saber: None,
         }
+    }
+
+    fn dav() -> Mount {
+        Mount::dav()
+    }
+
+    #[test]
+    fn resolves_virtual_folder_mount() {
+        let grant = grant();
+        let mount = Mount::nextcloud("/remote.php/webdav");
+        assert!(matches!(
+            resolve_target(&mount, &grant, &[]).unwrap(),
+            Target::Ancestor { child_name, child_href, .. }
+                if child_name == "Saber" && child_href == "/remote.php/webdav/Saber/"
+        ));
+        assert_eq!(
+            resolve_target(&mount, &grant, &["Saber".to_string()]).unwrap(),
+            Target::Inside {
+                path: "Tablet/Notes".to_string()
+            }
+        );
+        assert_eq!(
+            resolve_target(&mount, &grant, &["Saber".to_string(), "x.sbe".to_string()]).unwrap(),
+            Target::Inside {
+                path: "Tablet/Notes/x.sbe".to_string()
+            }
+        );
+        assert!(resolve_target(&mount, &grant, &["notes".to_string()]).is_err());
+        assert_eq!(
+            href_for(&mount, &grant, "Tablet/Notes/a b.sbe", false),
+            "/remote.php/webdav/Saber/a%20b.sbe"
+        );
+        assert_eq!(
+            href_for(&mount, &grant, "Tablet/Notes", true),
+            "/remote.php/webdav/Saber/"
+        );
+    }
+
+    #[test]
+    fn parses_client_mtime() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(client_mtime_millis(&headers), None);
+        headers.insert("x-oc-mtime", "1700000000".parse().unwrap());
+        assert_eq!(client_mtime_millis(&headers), Some(1_700_000_000_000));
+        headers.insert("x-oc-mtime", "nope".parse().unwrap());
+        assert_eq!(client_mtime_millis(&headers), None);
     }
 
     #[test]
     fn resolves_ancestors_inside_and_outside_paths() {
         let grant = grant();
         assert!(matches!(
-            resolve_target(&grant, &[]).unwrap(),
+            resolve_target(&dav(), &grant, &[]).unwrap(),
             Target::Ancestor { child_name, .. } if child_name == "notes"
         ));
         assert!(matches!(
-            resolve_target(&grant, &["notes".to_string()]).unwrap(),
+            resolve_target(&dav(), &grant, &["notes".to_string()]).unwrap(),
             Target::Ancestor { child_name, child_href, .. }
                 if child_name == "Tablet" && child_href == "/dav/notes/Tablet/"
         ));
         assert!(matches!(
-            resolve_target(&grant, &["notes".to_string(), "Tablet".to_string()]).unwrap(),
+            resolve_target(&dav(), &grant, &["notes".to_string(), "Tablet".to_string()]).unwrap(),
             Target::Ancestor { child_name, .. } if child_name == "Notes"
         ));
         assert_eq!(
             resolve_target(
+                &dav(),
                 &grant,
                 &[
                     "notes".to_string(),
@@ -1005,6 +1241,7 @@ mod tests {
         );
         assert_eq!(
             resolve_target(
+                &dav(),
                 &grant,
                 &[
                     "notes".to_string(),
@@ -1018,9 +1255,15 @@ mod tests {
                 path: "Tablet/Notes/a.pdf".to_string()
             }
         );
-        assert!(resolve_target(&grant, &["other".to_string()]).is_err());
-        assert!(resolve_target(&grant, &["notes".to_string(), "Private".to_string()]).is_err());
+        assert!(resolve_target(&dav(), &grant, &["other".to_string()]).is_err());
         assert!(resolve_target(
+            &dav(),
+            &grant,
+            &["notes".to_string(), "Private".to_string()]
+        )
+        .is_err());
+        assert!(resolve_target(
+            &dav(),
             &grant,
             &[
                 "notes".to_string(),
@@ -1034,14 +1277,20 @@ mod tests {
     #[test]
     fn decodes_and_rejects_paths() {
         assert_eq!(
-            decode_path_segments("/dav/notes/My%20Folder/a.pdf").unwrap(),
+            decode_path_segments("/dav/notes/My%20Folder/a.pdf", "/dav").unwrap(),
             vec!["notes", "My Folder", "a.pdf"]
         );
-        assert_eq!(decode_path_segments("/dav").unwrap(), Vec::<String>::new());
-        assert_eq!(decode_path_segments("/dav/").unwrap(), Vec::<String>::new());
-        assert!(decode_path_segments("/dav/notes/..%2Fx").is_err());
-        assert!(decode_path_segments("/dav/notes/../x").is_err());
-        assert!(decode_path_segments("/other").is_err());
+        assert_eq!(
+            decode_path_segments("/dav", "/dav").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            decode_path_segments("/dav/", "/dav").unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(decode_path_segments("/dav/notes/..%2Fx", "/dav").is_err());
+        assert!(decode_path_segments("/dav/notes/../x", "/dav").is_err());
+        assert!(decode_path_segments("/other", "/dav").is_err());
     }
 
     #[test]

@@ -141,17 +141,22 @@ impl VaultService {
         content: Vec<u8>,
         device: &DavDevice,
     ) -> Result<bool> {
-        self.dav_write_source(user, vault, path, WriteSource::Bytes(content), device)
+        self.dav_write_source(user, vault, path, WriteSource::Bytes(content), None, device)
             .await
     }
 
     /// Writes a whole file from a staged upload. The staged file is always cleaned up.
+    ///
+    /// `mtime_millis` records the client's own modification time (WebDAV `X-OC-Mtime`), which
+    /// sync clients compare against their local copy; without it every upload would look newer
+    /// than the client's file and be downloaded straight back.
     pub async fn dav_write_from_file(
         &self,
         user: &str,
         vault: &str,
         path: &str,
         staged: &Path,
+        mtime_millis: Option<i64>,
         device: &DavDevice,
     ) -> Result<bool> {
         let result = self
@@ -160,6 +165,7 @@ impl VaultService {
                 vault,
                 path,
                 WriteSource::File(staged.to_path_buf()),
+                mtime_millis,
                 device,
             )
             .await;
@@ -173,6 +179,7 @@ impl VaultService {
         vault: &str,
         path: &str,
         source: WriteSource,
+        mtime_millis: Option<i64>,
         device: &DavDevice,
     ) -> Result<bool> {
         let user = validate_slug(user, "user")?;
@@ -190,7 +197,15 @@ impl VaultService {
             if existing.as_ref().is_some_and(|entry| entry.is_dir) {
                 bail!("conflict: {path} is a directory");
             }
-            write_unlocked(&repo, &binary_root, &mut manifest, &path, source).await?;
+            write_unlocked(
+                &repo,
+                &binary_root,
+                &mut manifest,
+                &path,
+                source,
+                mtime_millis,
+            )
+            .await?;
             write_manifest(&repo, &manifest).await?;
             self.clear_pending_conflicts(&user, &vault, std::slice::from_ref(&path))
                 .await?;
@@ -346,6 +361,7 @@ impl VaultService {
                     &mut manifest,
                     &target,
                     WriteSource::Bytes(content),
+                    None,
                 )
                 .await?;
                 touched.upserts.push(target);
@@ -598,6 +614,7 @@ async fn write_unlocked(
     manifest: &mut BinaryManifest,
     path: &str,
     source: WriteSource,
+    mtime_millis: Option<i64>,
 ) -> Result<()> {
     if is_text_or_code_path(path) {
         let content = match source {
@@ -609,7 +626,15 @@ async fn write_unlocked(
             }
         };
         manifest.files.remove(path);
-        return write_repo_file(repo, path, &content).await;
+        write_repo_file(repo, path, &content).await?;
+        if let Some(mtime) = mtime_millis.filter(|value| *value > 0) {
+            let modified = UNIX_EPOCH + std::time::Duration::from_millis(mtime as u64);
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(repo_path(repo, path)?)?;
+            let _ = file.set_modified(modified);
+        }
+        return Ok(());
     }
 
     let staged = match source {
@@ -621,7 +646,7 @@ async fn write_unlocked(
             staged
         }
     };
-    let result = store_staged_binary(binary_root, manifest, path, &staged).await;
+    let result = store_staged_binary(binary_root, manifest, path, &staged, mtime_millis).await;
     let _ = fs::remove_file(&staged).await;
     result
 }
@@ -632,16 +657,21 @@ async fn store_staged_binary(
     manifest: &mut BinaryManifest,
     path: &str,
     staged: &Path,
+    mtime_millis: Option<i64>,
 ) -> Result<()> {
     let sha256 = sha256_file(staged).await?;
     // Many tablets re-upload every note on each sync. Keep the existing entry when the bytes
     // are identical so an unchanged file does not produce a new commit and a re-download on
-    // every Obsidian client.
-    if manifest
+    // every Obsidian client. A client-supplied mtime is still recorded so the client sees its
+    // own timestamp echoed back.
+    if let Some(existing) = manifest
         .files
-        .get(path)
-        .is_some_and(|existing| existing.sha256 == sha256)
+        .get_mut(path)
+        .filter(|existing| existing.sha256 == sha256)
     {
+        if let Some(mtime) = mtime_millis.filter(|value| *value > 0) {
+            existing.mtime = mtime;
+        }
         return Ok(());
     }
     let size = fs::metadata(staged).await?.len();
@@ -657,7 +687,9 @@ async fn store_staged_binary(
         path.to_string(),
         BinaryEntry {
             sha256,
-            mtime: unix_now_millis(),
+            mtime: mtime_millis
+                .filter(|value| *value > 0)
+                .unwrap_or_else(unix_now_millis),
             size,
             object_path,
         },

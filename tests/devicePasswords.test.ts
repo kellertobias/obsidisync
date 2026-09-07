@@ -4,9 +4,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   describeDevicePassword,
+  deviceUrl,
   devicePasswordsAvailabilityMessage,
   normalizeDeviceFolder,
   serverSupportsDevicePasswords,
+  serverSupportsSaber,
   webdavUrl
 } from "../src/devicePasswords";
 
@@ -45,6 +47,27 @@ test("device password descriptions include url and usage", () => {
   );
   assert.match(description, /^https:\/\/sync\.example\.com\/dav\/notes\/Tablet\/ · created /);
   assert.match(description, /last used never$/);
+});
+
+test("saber devices are described by their nextcloud login and pdf folder", () => {
+  const entry = {
+    id: "abc",
+    label: "Saber on iPad",
+    vault: "notes",
+    folder: "Saber/Sync",
+    username: "alice",
+    webdavPath: "/dav/notes/Saber/Sync/",
+    createdAt: "2026-09-02T10:00:00Z",
+    lastUsedAt: null,
+    kind: "saber" as const,
+    pdfFolder: "Saber"
+  };
+  assert.equal(deviceUrl(entry, "https://sync.example.com/"), "https://sync.example.com");
+  const description = describeDevicePassword(entry, "https://sync.example.com");
+  assert.match(description, /^Saber app \(Nextcloud login at https:\/\/sync\.example\.com\) · syncs to Saber\/Sync · PDFs in Saber · /);
+  assert.match(describeDevicePassword({ ...entry, pdfFolder: undefined }, "https://sync.example.com"), /encrypted files only/);
+  assert.equal(serverSupportsSaber({ features: ["webdavDevicePasswords", "saberNextcloud"] }), true);
+  assert.equal(serverSupportsSaber({ features: ["webdavDevicePasswords"] }), false);
 });
 
 test("device passwords are managed from settings and shown once after creation", () => {

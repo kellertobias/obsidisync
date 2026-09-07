@@ -643,6 +643,30 @@ impl VaultService {
         .await
     }
 
+    /// Names of the vaults a user has registered on this server, sorted.
+    pub async fn list_vaults(&self, user: &str) -> Result<Vec<String>> {
+        let user = validate_slug(user, "user")?;
+        let vaults_dir = self.data_dir.join("users").join(&user).join("vaults");
+        let mut names = Vec::new();
+        let mut vaults = match fs::read_dir(vaults_dir).await {
+            Ok(vaults) => vaults,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
+            Err(error) => return Err(error.into()),
+        };
+        while let Some(entry) = vaults.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let vault = entry.file_name().to_string_lossy().to_string();
+            if validate_slug(&vault, "vault").is_err() || !self.is_registered(&user, &vault).await {
+                continue;
+            }
+            names.push(vault);
+        }
+        names.sort();
+        Ok(names)
+    }
+
     pub async fn activity_feed(&self, user: &str, limit: usize) -> Result<Vec<ActivityFeedEntry>> {
         let user = validate_slug(user, "user")?;
         let mut entries = Vec::new();
