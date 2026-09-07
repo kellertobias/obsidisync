@@ -20,7 +20,8 @@
     "start:server": "cargo run --manifest-path rust-server/Cargo.toml",
     "test": "npm run test:plugin && npm run build:plugin && npm run test:server",
     "test:plugin": "node -e \"require('fs').rmSync('.tmp-tests',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node --test .tmp-tests/tests/*.test.js",
-    "test:server": "cargo test --manifest-path rust-server/Cargo.toml"
+    "test:server": "cargo test --manifest-path rust-server/Cargo.toml",
+    "test:e2e": "cargo build --manifest-path rust-server/Cargo.toml && node -e \"require('fs').rmSync('.tmp-tests',{recursive:true,force:true})\" && tsc -p tsconfig.test.json && node tests/e2e/harness.js"
   },
   "keywords": [
     "obsidian",

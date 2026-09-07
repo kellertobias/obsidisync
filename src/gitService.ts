@@ -317,7 +317,12 @@ export class GitService {
     };
 
     const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/sync`, request);
-    await this.applyServerFiles(vaultState, response.files, response.serverHead, hashesByPath(manifest));
+    // On a conflict the server sends conflict-marker files. They must stay visible as local
+    // changes so the next sync re-uploads them and the server keeps reporting the conflict;
+    // recording them in the manifest would make the client believe they were synced.
+    await this.applyServerFiles(vaultState, response.files, response.serverHead, hashesByPath(manifest), {
+      persistManifest: response.status !== "conflict"
+    });
 
     if (response.status === "conflict") {
       this.settings.syncStatus = "error";
@@ -516,15 +521,39 @@ export class GitService {
       const response = await this.postJson<SyncResponse>(`${this.vaultPath()}/resolve`, request);
       const vaultState = new VaultState(this.vault);
       await this.applyServerFiles(vaultState, response.files, response.serverHead, hashesByPath(this.settings.localManifest));
+      // Only the files that were just pushed count as synced. Recomputing the whole manifest
+      // here would mark every other unsynced local edit as already on the server.
+      let manifest = this.settings.localManifest;
+      for (const resolution of resolutions) {
+        const entry = resolution.kind === "delete" ? null : await vaultState.manifestEntryFor(resolution.path);
+        manifest = entry ? upsertManifestEntry(manifest, entry) : removeManifestEntry(manifest, resolution.path);
+      }
+      this.settings.localManifest = manifest;
       this.settings.serverHead = response.serverHead;
       this.settings.lastSyncedAt = new Date().toISOString();
       this.settings.lastSyncCompletedAt = this.settings.lastSyncedAt;
       this.settings.lastSyncError = response.status === "conflict" ? "Conflict remains after resolve attempt" : null;
-      this.settings.localManifest = await vaultState.computeManifest();
       await this.saveSettings();
       return response.status === "conflict" ? response.conflicts : [];
     });
     return result ?? [];
+  }
+
+  /**
+   * Conflicts the server still expects this device to resolve. Older servers have no such
+   * endpoint; they answer 404 and this returns an empty list.
+   */
+  async pendingConflicts(): Promise<SyncConflict[]> {
+    this.requireConfigured();
+    try {
+      const conflicts = await this.getJson<SyncConflict[]>(
+        `${this.vaultPath()}/conflicts?clientId=${encodeURIComponent(this.settings.clientId)}`
+      );
+      return Array.isArray(conflicts) ? conflicts : [];
+    } catch (error) {
+      if (error instanceof HttpStatusError && error.status === 404) return [];
+      throw error;
+    }
   }
 
   async resolveFile(path: string): Promise<SyncConflict[]> {
@@ -797,8 +826,10 @@ export class GitService {
     vaultState: VaultState,
     files: ServerFileChange[],
     serverHead: string | null,
-    localHashes: Map<string, string>
+    localHashes: Map<string, string>,
+    options: { persistManifest?: boolean } = {}
   ): Promise<void> {
+    const persistManifest = options.persistManifest ?? true;
     const notice = files.length >= DOWNLOAD_PROGRESS_NOTICE_MIN_FILES ? new Notice("ObsidiSync: applying server changes...", 0) : null;
     let appliedSinceSave = 0;
     try {
@@ -806,7 +837,7 @@ export class GitService {
         localHashes,
         download: (file) => this.downloadServerFile(file, serverHead),
         onProgress: (done, total, path) => notice?.setMessage(describeDownloadProgress(done, total, path)),
-        onApplied: async ({ path, entry }) => {
+        onApplied: !persistManifest ? undefined : async ({ path, entry }) => {
           this.settings.localManifest = entry
             ? upsertManifestEntry(this.settings.localManifest, entry)
             : removeManifestEntry(this.settings.localManifest, path);

@@ -18,7 +18,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
@@ -293,6 +293,7 @@ impl VaultService {
                         .conflict_response(
                             &user,
                             &vault,
+                            &request.client_id,
                             &repo,
                             &binary_root,
                             base_head.as_deref(),
@@ -321,6 +322,7 @@ impl VaultService {
                     .conflict_response(
                         &user,
                         &vault,
+                        &request.client_id,
                         &repo,
                         &binary_root,
                         base_head.as_deref(),
@@ -345,6 +347,7 @@ impl VaultService {
                         .conflict_response(
                             &user,
                             &vault,
+                            &request.client_id,
                             &repo,
                             &binary_root,
                             base_head.as_deref(),
@@ -357,6 +360,7 @@ impl VaultService {
                         .conflict_response(
                             &user,
                             &vault,
+                            &request.client_id,
                             &repo,
                             &binary_root,
                             base_head.as_deref(),
@@ -364,6 +368,22 @@ impl VaultService {
                         )
                         .await;
                 }
+            }
+
+            // A conflict this client produced earlier stays a conflict until it resolves it,
+            // even when the client no longer uploads the path. Sending no files keeps the
+            // client's local copy (usually the conflict-marker file) untouched.
+            let still_pending = pending_conflicts_owned_by(
+                &self.read_pending_conflicts(&user, &vault).await?,
+                &request.client_id,
+            );
+            if !still_pending.is_empty() {
+                return Ok(SyncResponse {
+                    status: SyncStatus::Conflict,
+                    server_head: self.head_from_repo(&repo).await?,
+                    files: vec![],
+                    conflicts: still_pending,
+                });
             }
 
             let files = self
@@ -904,23 +924,51 @@ impl VaultService {
                 self.fetch(&repo).await?;
                 if let Some(conflicts) = self.rebase_remote(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&user, &vault, &repo, &binary_root, None, conflicts)
+                        .conflict_response(
+                            &user,
+                            &vault,
+                            &request.client_id,
+                            &repo,
+                            &binary_root,
+                            None,
+                            conflicts,
+                        )
                         .await;
                 }
                 if let Some(conflicts) = self.push_after_rebase(&repo, &state.branch).await? {
                     return self
-                        .conflict_response(&user, &vault, &repo, &binary_root, None, conflicts)
+                        .conflict_response(
+                            &user,
+                            &vault,
+                            &request.client_id,
+                            &repo,
+                            &binary_root,
+                            None,
+                            conflicts,
+                        )
                         .await;
                 }
             }
             self.clear_pending_conflicts(&user, &vault, &resolved_paths)
                 .await?;
+            // Files this device still has to resolve keep their local (conflict-marker) copy.
+            let still_pending: BTreeSet<String> = pending_conflicts_owned_by(
+                &self.read_pending_conflicts(&user, &vault).await?,
+                &request.client_id,
+            )
+            .into_iter()
+            .map(|conflict| conflict.path)
+            .collect();
+            let files = self
+                .changed_files_since(&repo, &binary_root, None, &[], inline)
+                .await?
+                .into_iter()
+                .filter(|file| !still_pending.contains(file_path(file)))
+                .collect();
             Ok(SyncResponse {
                 status: SyncStatus::Ok,
                 server_head: self.head_from_repo(&repo).await?,
-                files: self
-                    .changed_files_since(&repo, &binary_root, None, &[], inline)
-                    .await?,
+                files,
                 conflicts: vec![],
             })
         })
@@ -1039,7 +1087,7 @@ impl VaultService {
             match change {
                 ClientChange::Delete { path } => {
                     let safe = validate_vault_path(path)?;
-                    if pending_conflicts.contains(&safe) {
+                    if pending_conflicts.contains_key(&safe) {
                         conflicts.push(SyncConflict {
                             path: safe,
                             reason: PENDING_CONFLICT_REASON.to_string(),
@@ -1078,7 +1126,7 @@ impl VaultService {
                     ..
                 } => {
                     let safe = validate_vault_path(path)?;
-                    if pending_conflicts.contains(&safe) {
+                    if pending_conflicts.contains_key(&safe) {
                         conflicts.push(SyncConflict {
                             path: safe,
                             reason: PENDING_CONFLICT_REASON.to_string(),
@@ -1347,16 +1395,18 @@ impl VaultService {
             == 0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn conflict_response(
         &self,
         user: &str,
         vault: &str,
+        client_id: &str,
         repo: &Path,
         binary_root: &Path,
         base_head: Option<&str>,
         conflicts: Vec<SyncConflict>,
     ) -> Result<SyncResponse> {
-        self.record_pending_conflicts(user, vault, &conflicts)
+        self.record_pending_conflicts(user, vault, client_id, &conflicts)
             .await?;
         let conflict_paths: Vec<String> = conflicts
             .iter()
@@ -1504,31 +1554,53 @@ impl VaultService {
         self.vault_dir(user, vault).join(VERSION_METADATA_FILE_NAME)
     }
 
-    async fn read_pending_conflicts(&self, user: &str, vault: &str) -> Result<BTreeSet<String>> {
+    /// Pending conflicts are keyed by path and remember which client produced them, so that
+    /// client keeps being told about them on every sync until it resolves them. Files written
+    /// by older servers were a plain list of paths; those entries have no owner and are
+    /// reported to every client.
+    async fn read_pending_conflicts(
+        &self,
+        user: &str,
+        vault: &str,
+    ) -> Result<BTreeMap<String, Option<String>>> {
         let path = self.pending_conflicts_path(user, vault);
         let bytes = match fs::read(path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeSet::new());
+                return Ok(BTreeMap::new());
             }
             Err(error) => return Err(error.into()),
         };
-        let paths: Vec<String> = serde_json::from_slice(&bytes)?;
-        paths
-            .into_iter()
-            .map(|path| validate_vault_path(&path))
-            .collect()
+        let raw: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let mut pending = BTreeMap::new();
+        match raw {
+            serde_json::Value::Array(paths) => {
+                for value in paths {
+                    if let serde_json::Value::String(path) = value {
+                        pending.insert(validate_vault_path(&path)?, None);
+                    }
+                }
+            }
+            serde_json::Value::Object(entries) => {
+                for (path, owner) in entries {
+                    let owner = owner.as_str().map(|value| value.to_string());
+                    pending.insert(validate_vault_path(&path)?, owner);
+                }
+            }
+            _ => bail!("pending conflicts file has an unexpected shape"),
+        }
+        Ok(pending)
     }
 
     async fn write_pending_conflicts(
         &self,
         user: &str,
         vault: &str,
-        paths: &BTreeSet<String>,
+        pending: &BTreeMap<String, Option<String>>,
     ) -> Result<()> {
         fs::write(
             self.pending_conflicts_path(user, vault),
-            serde_json::to_vec_pretty(&paths.iter().collect::<Vec<_>>())?,
+            serde_json::to_vec_pretty(pending)?,
         )
         .await?;
         Ok(())
@@ -1538,13 +1610,16 @@ impl VaultService {
         &self,
         user: &str,
         vault: &str,
+        client_id: &str,
         conflicts: &[SyncConflict],
     ) -> Result<()> {
         let mut pending = self.read_pending_conflicts(user, vault).await?;
         for conflict in conflicts {
             let path = validate_vault_path(&conflict.path)?;
             if is_client_visible_conflict_path(&path) {
-                pending.insert(path);
+                pending
+                    .entry(path)
+                    .or_insert_with(|| Some(client_id.to_string()));
             }
         }
         self.write_pending_conflicts(user, vault, &pending).await
@@ -1565,6 +1640,20 @@ impl VaultService {
             return Ok(());
         }
         self.write_pending_conflicts(user, vault, &pending).await
+    }
+
+    /// Conflicts a client still has to resolve: the ones it produced itself plus legacy entries
+    /// without a recorded owner.
+    pub async fn pending_conflicts_for(
+        &self,
+        user: &str,
+        vault: &str,
+        client_id: &str,
+    ) -> Result<Vec<SyncConflict>> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let pending = self.read_pending_conflicts(&user, &vault).await?;
+        Ok(pending_conflicts_owned_by(&pending, client_id))
     }
 
     async fn new_upload_id(&self, upload_dir: &Path) -> Result<String> {
@@ -2023,6 +2112,26 @@ fn extract_sync_device(subject: &str) -> Option<String> {
 
 fn validate_optional_commit_id(input: Option<&str>) -> Result<Option<String>> {
     input.map(validate_commit_id).transpose()
+}
+
+fn pending_conflicts_owned_by(
+    pending: &BTreeMap<String, Option<String>>,
+    client_id: &str,
+) -> Vec<SyncConflict> {
+    pending
+        .iter()
+        .filter(|(path, owner)| {
+            is_client_visible_conflict_path(path)
+                && match owner {
+                    None => true,
+                    Some(owner) => owner == client_id,
+                }
+        })
+        .map(|(path, _)| SyncConflict {
+            path: path.clone(),
+            reason: PENDING_CONFLICT_REASON.to_string(),
+        })
+        .collect()
 }
 
 fn is_client_visible_conflict_path(path: &str) -> bool {

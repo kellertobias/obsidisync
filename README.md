@@ -417,15 +417,14 @@ The server uses:
 - `git rebase origin/{branch}` for remote integration when a remote URL is configured, preserving flat history.
 - `git merge-file` for server/client text conflicts before committing.
 
-If a conflict remains, the plugin receives conflict-marker content and writes it into the file, and the server remembers the path as pending until this device resolves it. The **Resolve sync conflicts** dialog opens automatically after such a sync and lists every conflicted file:
+If a conflict remains, the plugin receives conflict-marker content and writes it into the file, and the server remembers the path as pending **for that device** until it resolves it. Every later sync from that device reports the pending files again (without sending file content, so the local copy is never overwritten), and other devices keep syncing normally. The **Resolve sync conflicts** dialog opens automatically after such a sync, also lists what the server still expects this device to resolve, and works in two steps:
 
-- Each file offers **Server**, **Local**, or **Merge…** (a per-change editor with side-by-side previews and a free-text field). Resolving one file moves straight on to the next one.
-- With several files, **Use server version for all** / **Use local version for all** resolves every file with text markers in one request.
-- A file that was deleted locally while the server still waits for it can be removed on the server (**Delete on server**) or restored from the latest server version.
-- A file without usable markers (binary, or already cleaned up by hand) is pushed as-is with **Use current content**.
-- Markers written by git itself during a server-side rebase are recognised for server-reported files, labelled with git's own side names.
+1. Choose per file: **Keep server**, **Keep local**, or **Merge…** (a per-change editor with side-by-side previews and free-text editing). Files without text markers offer **Use current content** or **Delete on server**; files that no longer exist locally offer **Delete on server** or **Restore server version**. With several files, **Server** / **Local** fill the choice for all files with markers.
+2. Press **Resolve N files**. All choices go to the server in one request. Closing the dialog keeps the conflicts and your selections.
 
-Closing the dialog keeps the conflicts; the next automatic sync shows the clickable conflict notice again but does not force the dialog back open until the set of conflicts changes. Reopen it from the sync menu, the **Open conflict resolver** command, or the **Resolve** action in the sidebar file-history view. Closing the resolver refreshes open ObsidiSync history views and the mobile sync indicator.
+Markers written by git itself during a server-side rebase are recognised for server-reported files, labelled with git's own side names. The next automatic sync shows the clickable conflict notice again but does not force the dialog back open until the set of conflicts changes. Reopen it from the sync menu, the **Open conflict resolver** command, or the **Resolve** action in the sidebar file-history view. Closing the resolver refreshes open ObsidiSync history views and the mobile sync indicator.
+
+`npm run test:e2e` runs the conflict flow end to end: it starts the Rust server locally and drives the plugin's sync service from Node through a small Obsidian stand-in (`tests/e2e/`).
 
 ## Backup and restore
 

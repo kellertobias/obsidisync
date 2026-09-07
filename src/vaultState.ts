@@ -86,6 +86,15 @@ export class VaultState {
     return entries;
   }
 
+  /** Manifest entry for one file as it is on disk right now, or null when it does not exist. */
+  async manifestEntryFor(path: string): Promise<ManifestEntry | null> {
+    const safePath = assertSafeVaultPath(path);
+    const stat = await this.vault.adapter.stat(normalizePath(safePath));
+    if (!stat || stat.type !== "file") return null;
+    const buffer = await this.vault.adapter.readBinary(normalizePath(safePath));
+    return { path: safePath, sha256: await sha256Hex(buffer), mtime: stat.mtime, size: buffer.byteLength };
+  }
+
   async backupTo(folder: string): Promise<number> {
     const target = normalizePath(folder).replace(/\/+$/, "");
     if (!target) throw new Error("Backup folder must not be empty");

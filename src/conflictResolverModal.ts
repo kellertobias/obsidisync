@@ -10,21 +10,30 @@ import { ConflictResolution, GitService } from "./gitService";
 import { SyncConflict } from "./protocol";
 
 type Side = "server" | "local";
-type ConflictChoice = Side | "custom";
+
+/** What the user picked for one file. Nothing is sent until "Resolve" is pressed. */
+export type FileChoice =
+  | { kind: "server" }
+  | { kind: "local" }
+  | { kind: "custom"; content: string }
+  | { kind: "current" }
+  | { kind: "delete" }
+  | { kind: "restore" };
 
 interface ConflictFile {
   path: string;
   reason: string;
-  /** The server reported this path in its last sync or resolve response. */
+  /** The server reported this path in a sync, resolve, or pending-conflicts response. */
   reportedByServer: boolean;
   /** The file currently exists in the local vault. */
   exists: boolean;
   /** Parsed conflict hunks, or null when the file has no usable text markers. */
   parsed: ParsedConflictDocument | null;
+  choice: FileChoice | null;
 }
 
 interface HunkResolution {
-  choice: ConflictChoice;
+  choice: Side | "custom";
   custom: string;
 }
 
@@ -37,12 +46,12 @@ export class ConflictResolverModal extends Modal {
   /** Paths the server told us are conflicted, with the server's reason. */
   private reported = new Map<string, string>();
   private conflicts: ConflictFile[] = [];
+  private choices = new Map<string, FileChoice>();
   private syncStateEl: HTMLElement | null = null;
   private unsubscribeSyncState: (() => void) | null = null;
   private syncRunning = false;
   private busy = false;
   private actionButtons: HTMLButtonElement[] = [];
-  private pendingBulk: Side | null = null;
 
   constructor(
     app: App,
@@ -63,6 +72,7 @@ export class ConflictResolverModal extends Modal {
       this.updateSyncStatus();
     });
     this.renderProgress("Resolve sync conflicts", "Looking for conflicted files...");
+    await this.loadPendingFromServer();
     await this.loadConflicts();
     this.renderFileList();
   }
@@ -76,6 +86,17 @@ export class ConflictResolverModal extends Modal {
 
   // ---------------------------------------------------------------------------------------------
   // Data
+
+  private async loadPendingFromServer(): Promise<void> {
+    try {
+      for (const conflict of await this.gitService.pendingConflicts()) {
+        if (!this.reported.has(conflict.path)) this.reported.set(conflict.path, conflict.reason);
+      }
+    } catch (error) {
+      // Offline or not logged in: fall back to what the last sync reported and the vault scan.
+      console.warn("ObsidiSync: could not load pending conflicts from the server", error);
+    }
+  }
 
   private async loadConflicts(): Promise<void> {
     const byPath = new Map<string, ConflictFile>();
@@ -92,7 +113,7 @@ export class ConflictResolverModal extends Modal {
           parsed = null;
         }
       }
-      byPath.set(path, { path, reason: friendlyReason(reason), reportedByServer: true, exists, parsed });
+      byPath.set(path, { path, reason: friendlyReason(reason), reportedByServer: true, exists, parsed, choice: null });
     }
 
     const files = this.app.vault.getFiles();
@@ -107,7 +128,8 @@ export class ConflictResolverModal extends Modal {
             reason: SCANNED_REASON,
             reportedByServer: false,
             exists: true,
-            parsed: parseConflictDocument(content)
+            parsed: parseConflictDocument(content),
+            choice: null
           });
         } catch {
           // Binary or unreadable files cannot be resolved in the text hunk editor.
@@ -116,10 +138,21 @@ export class ConflictResolverModal extends Modal {
     );
 
     this.conflicts = Array.from(byPath.values()).sort((left, right) => left.path.localeCompare(right.path));
+    for (const conflict of this.conflicts) {
+      const choice = this.choices.get(conflict.path) ?? null;
+      conflict.choice = choice && isChoiceAvailable(conflict, choice) ? choice : null;
+      if (!conflict.choice) this.choices.delete(conflict.path);
+    }
   }
 
-  private conflictAt(path: string): ConflictFile | undefined {
-    return this.conflicts.find((conflict) => conflict.path === path);
+  private setChoice(conflict: ConflictFile, choice: FileChoice | null): void {
+    conflict.choice = choice;
+    if (choice) this.choices.set(conflict.path, choice);
+    else this.choices.delete(conflict.path);
+  }
+
+  private selectedConflicts(): ConflictFile[] {
+    return this.conflicts.filter((conflict) => conflict.choice);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -135,20 +168,22 @@ export class ConflictResolverModal extends Modal {
     if (this.conflicts.length === 0) {
       contentEl.createEl("p", { text: "No conflicts are left in this vault." });
       const actions = this.createButtonRow(contentEl);
-      this.createButton(actions, "Close", () => this.close(), { primary: true });
+      this.createButton(actions, "Close", () => this.close(), { primary: true, plain: true });
       return;
     }
 
     const count = this.conflicts.length;
-    contentEl.createEl("p", { text: `${count} conflicted file${count === 1 ? "" : "s"}. Pick a version per file, or resolve all of them at once.` });
+    contentEl.createEl("p", {
+      text: `${count} conflicted file${count === 1 ? "" : "s"}. Choose what to keep for each file, then press Resolve.`
+    });
 
-    this.renderBulkActions(contentEl);
+    this.renderQuickSelect(contentEl);
 
     const list = contentEl.createDiv();
     list.style.display = "flex";
     list.style.flexDirection = "column";
     list.style.gap = "8px";
-    list.style.maxHeight = "55vh";
+    list.style.maxHeight = "50vh";
     list.style.overflow = "auto";
     list.style.border = "1px solid var(--background-modifier-border)";
     list.style.borderRadius = "8px";
@@ -156,67 +191,50 @@ export class ConflictResolverModal extends Modal {
 
     this.conflicts.forEach((conflict, index) => this.renderFileRow(list, conflict, index));
 
+    const selected = this.selectedConflicts().length;
     const footer = this.createButtonRow(contentEl);
+    const resolveButton = this.createButton(
+      footer,
+      selected === 0 ? "Resolve (nothing selected)" : `Resolve ${selected} file${selected === 1 ? "" : "s"}`,
+      () => void this.resolveSelected(),
+      { primary: true }
+    );
+    resolveButton.disabled = resolveButton.disabled || selected === 0;
     this.createButton(footer, "Close", () => this.close(), { plain: true });
     contentEl.createEl("p", {
-      text: "Closing keeps the conflicts. Reopen this dialog any time from the sync menu or the \"Open conflict resolver\" command.",
+      text: "Closing keeps the conflicts and your selections. Reopen this dialog any time from the sync menu or the \"Open conflict resolver\" command.",
       cls: "setting-item-description"
     });
   }
 
-  private renderBulkActions(container: HTMLElement): void {
+  private renderQuickSelect(container: HTMLElement): void {
     const resolvable = this.conflicts.filter((conflict) => conflict.parsed);
     if (this.conflicts.length < 2 || resolvable.length === 0) return;
 
-    const box = container.createDiv();
-    box.style.border = "1px solid var(--background-modifier-border)";
-    box.style.borderRadius = "8px";
-    box.style.padding = "10px";
-    box.style.marginBottom = "10px";
-    box.style.background = "var(--background-secondary)";
-
-    const skipped = this.conflicts.length - resolvable.length;
-    if (this.pendingBulk) {
-      const side = this.pendingBulk;
-      box.createEl("div", {
-        text: `Use the ${side} version for all ${resolvable.length} file${resolvable.length === 1 ? "" : "s"} with conflict markers?`,
-        attr: { style: "font-weight:600;margin-bottom:6px" }
-      });
-      if (skipped > 0) {
-        box.createEl("div", {
-          text: `${skipped} file${skipped === 1 ? "" : "s"} without text markers will stay in the list.`,
-          cls: "setting-item-description"
-        });
-      }
-      const actions = this.createButtonRow(box);
-      this.createButton(actions, `Yes, use ${side} for all`, () => {
-        this.pendingBulk = null;
-        void this.apply(
-          resolvable.map((conflict) => ({
-            path: conflict.path,
-            kind: "text",
-            content: buildResolvedText(conflict.parsed as ParsedConflictDocument, () => ({ side }))
-          })),
-          { returnTo: "list" }
-        );
-      }, { primary: true });
-      this.createButton(actions, "Cancel", () => {
-        this.pendingBulk = null;
+    const row = container.createDiv();
+    row.style.display = "flex";
+    row.style.flexWrap = "wrap";
+    row.style.alignItems = "center";
+    row.style.gap = "8px";
+    row.style.marginBottom = "10px";
+    const label = row.createEl("span", { text: "Select for all files with markers:" });
+    label.style.fontSize = "12px";
+    label.style.color = "var(--text-muted)";
+    const fill = (side: Side) => {
+      for (const conflict of resolvable) this.setChoice(conflict, { kind: side });
+      this.renderFileList();
+    };
+    this.createButton(row, "Server", () => fill("server"), { plain: true, compact: true });
+    this.createButton(row, "Local", () => fill("local"), { plain: true, compact: true });
+    this.createButton(
+      row,
+      "Clear",
+      () => {
+        for (const conflict of this.conflicts) this.setChoice(conflict, null);
         this.renderFileList();
-      }, { plain: true });
-      return;
-    }
-
-    box.createEl("div", { text: "Resolve all at once", attr: { style: "font-weight:600;margin-bottom:6px" } });
-    const actions = this.createButtonRow(box);
-    this.createButton(actions, "Use server version for all", () => {
-      this.pendingBulk = "server";
-      this.renderFileList();
-    });
-    this.createButton(actions, "Use local version for all", () => {
-      this.pendingBulk = "local";
-      this.renderFileList();
-    });
+      },
+      { plain: true, compact: true }
+    );
   }
 
   private renderFileRow(list: HTMLElement, conflict: ConflictFile, index: number): void {
@@ -227,6 +245,7 @@ export class ConflictResolverModal extends Modal {
     row.style.padding = "8px";
     row.style.borderRadius = "6px";
     row.style.background = "var(--background-secondary)";
+    if (conflict.choice) row.style.outline = "1px solid var(--interactive-accent)";
 
     const name = row.createEl("div", { text: conflict.path });
     name.style.fontWeight = "700";
@@ -240,39 +259,58 @@ export class ConflictResolverModal extends Modal {
     detail.style.fontSize = "12px";
 
     const actions = this.createButtonRow(row, { compact: true });
+    const toggle = (label: string, choice: FileChoice) => {
+      const active = Boolean(conflict.choice && conflict.choice.kind === choice.kind);
+      const button = this.createButton(
+        actions,
+        label,
+        () => {
+          this.setChoice(conflict, active ? null : choice);
+          this.renderFileList();
+        },
+        { plain: true, compact: true }
+      );
+      button.toggleClass("mod-cta", active);
+      button.setAttr("aria-pressed", String(active));
+      return button;
+    };
+
     if (!conflict.exists) {
-      this.createButton(actions, "Delete on server", () => void this.apply([{ path: conflict.path, kind: "delete" }], { returnTo: "list" }));
-      this.createButton(actions, "Restore server version", () => void this.restoreServerVersion(conflict.path));
+      toggle("Delete on server", { kind: "delete" });
+      toggle("Restore server version", { kind: "restore" });
       return;
     }
     if (conflict.parsed) {
-      this.createButton(actions, "Server", () => void this.resolveWholeFile(conflict, "server", { returnTo: "list" }));
-      this.createButton(actions, "Local", () => void this.resolveWholeFile(conflict, "local", { returnTo: "list" }));
-      this.createButton(actions, "Merge…", () => this.renderFile(index), { primary: true });
+      toggle(`Keep ${sideLabel(conflict.parsed, "server")}`, { kind: "server" });
+      toggle(`Keep ${sideLabel(conflict.parsed, "local")}`, { kind: "local" });
+      const merge = this.createButton(actions, conflict.choice?.kind === "custom" ? "Edit merge…" : "Merge…", () => this.renderFile(index), {
+        plain: true,
+        compact: true
+      });
+      merge.toggleClass("mod-cta", conflict.choice?.kind === "custom");
+      merge.setAttr("aria-pressed", String(conflict.choice?.kind === "custom"));
       return;
     }
-    this.createButton(actions, "Use current content", () => void this.apply([{ path: conflict.path, kind: "current" }], { returnTo: "list" }), { primary: true });
-    this.createButton(actions, "Open file", () => void this.openInEditor(conflict.path));
+    toggle("Use current content", { kind: "current" });
+    toggle("Delete on server", { kind: "delete" });
+    this.createButton(actions, "Open file", () => void this.openInEditor(conflict.path), { plain: true, compact: true });
   }
 
   private describeConflict(conflict: ConflictFile): string {
     if (!conflict.exists) return `${conflict.reason}. The file no longer exists in this vault.`;
-    if (!conflict.parsed) return `${conflict.reason}. No text markers found; the current file content will be used as the resolution.`;
+    if (!conflict.parsed) return `${conflict.reason}. No text markers found; the file can be pushed as it is now.`;
     const hunks = conflict.parsed.hunks.length;
     const kind = conflict.parsed.generic ? "git-style change" : "change";
-    return `${conflict.reason}. ${hunks} conflicted ${kind}${hunks === 1 ? "" : "s"}.`;
+    const chosen = conflict.choice?.kind === "custom" ? " Merged by hand." : "";
+    return `${conflict.reason}. ${hunks} conflicted ${kind}${hunks === 1 ? "" : "s"}.${chosen}`;
   }
 
   // ---------------------------------------------------------------------------------------------
-  // Single file view (merge editor)
+  // Single file merge editor
 
   private renderFile(index: number): void {
     const conflict = this.conflicts[index];
-    if (!conflict) {
-      this.renderFileList();
-      return;
-    }
-    if (!conflict.parsed) {
+    if (!conflict?.parsed) {
       this.renderFileList();
       return;
     }
@@ -283,9 +321,8 @@ export class ConflictResolverModal extends Modal {
 
     contentEl.createEl("h2", { text: conflict.path });
     this.renderSyncStatus(contentEl);
-    const total = this.conflicts.length;
     contentEl.createEl("p", {
-      text: `File ${index + 1} of ${total} · ${this.describeConflict(conflict)}`,
+      text: `File ${index + 1} of ${this.conflicts.length} · ${this.describeConflict(conflict)}`,
       cls: "setting-item-description"
     });
     if (parsed.generic) {
@@ -295,11 +332,17 @@ export class ConflictResolverModal extends Modal {
       });
     }
 
-    const quick = this.createButtonRow(contentEl);
-    this.createButton(quick, `Use ${sideLabel(parsed, "server")} version`, () => void this.resolveWholeFile(conflict, "server", { returnTo: "next", index }));
-    this.createButton(quick, `Use ${sideLabel(parsed, "local")} version`, () => void this.resolveWholeFile(conflict, "local", { returnTo: "next", index }));
-
-    const resolutions: HunkResolution[] = parsed.hunks.map((hunk) => ({ choice: "server", custom: hunk.server }));
+    // A hand merge stores whole-file content, which cannot be split back into hunks reliably,
+    // so it is edited as one block. Otherwise start every hunk from the side chosen in the list.
+    if (conflict.choice?.kind === "custom") {
+      this.renderWholeFileEditor(index, conflict, conflict.choice.content);
+      return;
+    }
+    const startSide: Side = conflict.choice?.kind === "local" ? "local" : "server";
+    const resolutions: HunkResolution[] = parsed.hunks.map((hunk) => ({
+      choice: startSide,
+      custom: startSide === "server" ? hunk.server : hunk.local
+    }));
 
     const hunkList = contentEl.createDiv();
     hunkList.style.display = "flex";
@@ -312,15 +355,54 @@ export class ConflictResolverModal extends Modal {
     });
 
     const footer = this.createButtonRow(contentEl);
-    this.createButton(footer, parsed.hunks.length === 1 ? "Apply selection" : "Apply merged result", () => {
-      let hunkIndex = 0;
-      const content = buildResolvedText(parsed, () => {
-        const resolution = resolutions[hunkIndex++];
-        if (resolution.choice === "custom") return { content: resolution.custom };
-        return { side: resolution.choice };
-      });
-      void this.apply([{ path: conflict.path, kind: "text", content }], { returnTo: "next", index });
-    }, { primary: true });
+    this.createButton(
+      footer,
+      "Use this merge",
+      () => {
+        let hunkIndex = 0;
+        const content = buildResolvedText(parsed, () => {
+          const resolution = resolutions[hunkIndex++];
+          if (resolution.choice === "custom") return { content: resolution.custom };
+          return { side: resolution.choice };
+        });
+        const allServer = resolutions.every((resolution) => resolution.choice === "server");
+        const allLocal = resolutions.every((resolution) => resolution.choice === "local");
+        this.setChoice(conflict, allServer ? { kind: "server" } : allLocal ? { kind: "local" } : { kind: "custom", content });
+        this.renderFileList();
+      },
+      { primary: true, plain: true }
+    );
+    this.createButton(footer, "Back to list", () => this.renderFileList(), { plain: true });
+    this.createButton(footer, "Close", () => this.close(), { plain: true });
+  }
+
+  private renderWholeFileEditor(index: number, conflict: ConflictFile, content: string): void {
+    const { contentEl } = this;
+    const textarea = contentEl.createEl("textarea");
+    textarea.value = content;
+    textarea.style.width = "100%";
+    textarea.style.minHeight = "50vh";
+    textarea.style.resize = "vertical";
+    textarea.style.fontFamily = "var(--font-monospace)";
+    const footer = this.createButtonRow(contentEl);
+    this.createButton(
+      footer,
+      "Use this merge",
+      () => {
+        this.setChoice(conflict, { kind: "custom", content: textarea.value });
+        this.renderFileList();
+      },
+      { primary: true, plain: true }
+    );
+    this.createButton(
+      footer,
+      "Start over from the conflict markers",
+      () => {
+        this.setChoice(conflict, null);
+        this.renderFile(index);
+      },
+      { plain: true }
+    );
     this.createButton(footer, "Back to list", () => this.renderFileList(), { plain: true });
     this.createButton(footer, "Close", () => this.close(), { plain: true });
   }
@@ -355,9 +437,9 @@ export class ConflictResolverModal extends Modal {
     grid.style.gap = "8px";
 
     const serverWrap = this.renderPreview(grid, capitalize(sideLabel(parsed, "server")), hunk.server);
-    const serverButton = this.createButton(serverWrap, `Use ${sideLabel(parsed, "server")}`, () => setChoice("server"));
+    const serverButton = this.createButton(serverWrap, `Use ${sideLabel(parsed, "server")}`, () => setChoice("server"), { plain: true });
     const localWrap = this.renderPreview(grid, capitalize(sideLabel(parsed, "local")), hunk.local);
-    const localButton = this.createButton(localWrap, `Use ${sideLabel(parsed, "local")}`, () => setChoice("local"));
+    const localButton = this.createButton(localWrap, `Use ${sideLabel(parsed, "local")}`, () => setChoice("local"), { plain: true });
 
     const editLabel = item.createEl("div", { text: "Or edit the result by hand" });
     editLabel.style.fontSize = "12px";
@@ -422,42 +504,26 @@ export class ConflictResolverModal extends Modal {
   // ---------------------------------------------------------------------------------------------
   // Resolution
 
-  private async resolveWholeFile(conflict: ConflictFile, side: Side, navigation: Navigation): Promise<void> {
-    if (!conflict.parsed) return;
-    const content = buildResolvedText(conflict.parsed, () => ({ side }));
-    await this.apply([{ path: conflict.path, kind: "text", content }], navigation);
-  }
-
-  private async restoreServerVersion(path: string): Promise<void> {
+  private async resolveSelected(): Promise<void> {
     if (this.busy) return;
+    const selected = this.selectedConflicts();
+    if (selected.length === 0) return;
     this.busy = true;
-    this.renderProgress(path, "Fetching the server version...");
+    const paths = selected.map((conflict) => conflict.path);
+    this.renderProgress(
+      paths.length === 1 ? paths[0] : `${paths.length} files`,
+      `Pushing resolution${paths.length === 1 ? "" : "s"}...`
+    );
     try {
-      const history = await this.gitService.history(path);
-      const latest = history[0];
-      if (!latest) throw new Error("The server has no committed version of this file. Delete it on the server instead.");
-      const version = await this.gitService.fileAtVersion(path, latest.hash);
-      const bytes = Uint8Array.from(atob(version.contentBase64), (char) => char.charCodeAt(0));
-      await this.ensureParentFolder(path);
-      await this.app.vault.adapter.writeBinary(path, bytes.buffer);
-    } catch (error) {
-      this.busy = false;
-      this.renderError([path], error, () => void this.restoreServerVersion(path));
-      return;
-    }
-    this.busy = false;
-    await this.apply([{ path, kind: "current" }], { returnTo: "list" });
-  }
-
-  private async apply(resolutions: ConflictResolution[], navigation: Navigation): Promise<void> {
-    if (this.busy || resolutions.length === 0) return;
-    this.busy = true;
-    const paths = resolutions.map((resolution) => resolution.path);
-    const label = paths.length === 1 ? paths[0] : `${paths.length} files`;
-    this.renderProgress(label, `Pushing resolution${paths.length === 1 ? "" : "s"}...`);
-    try {
+      const resolutions: ConflictResolution[] = [];
+      for (const conflict of selected) {
+        resolutions.push(await this.toResolution(conflict));
+      }
       const remaining = await this.gitService.resolveConflicts(resolutions);
-      for (const path of paths) this.reported.delete(path);
+      for (const path of paths) {
+        this.reported.delete(path);
+        this.choices.delete(path);
+      }
       for (const conflict of remaining) this.reported.set(conflict.path, conflict.reason);
       await this.loadConflicts();
 
@@ -472,18 +538,39 @@ export class ConflictResolverModal extends Modal {
         this.close();
         return;
       }
-      if (navigation.returnTo === "next") {
-        const nextIndex = Math.min(navigation.index, this.conflicts.length - 1);
-        if (this.conflicts[nextIndex]?.parsed) {
-          this.renderFile(nextIndex);
-          return;
-        }
-      }
       this.renderFileList();
     } catch (error) {
-      this.renderError(paths, error, () => void this.apply(resolutions, navigation));
+      this.renderError(paths, error, () => void this.resolveSelected());
     } finally {
       this.busy = false;
+    }
+  }
+
+  /** Turns a choice into what the sync service needs, fetching the server version when asked. */
+  private async toResolution(conflict: ConflictFile): Promise<ConflictResolution> {
+    const choice = conflict.choice;
+    if (!choice) throw new Error(`No choice for ${conflict.path}`);
+    switch (choice.kind) {
+      case "server":
+      case "local":
+        if (!conflict.parsed) throw new Error(`${conflict.path} has no conflict markers to pick a side from`);
+        return { path: conflict.path, kind: "text", content: buildResolvedText(conflict.parsed, () => ({ side: choice.kind })) };
+      case "custom":
+        return { path: conflict.path, kind: "text", content: choice.content };
+      case "current":
+        return { path: conflict.path, kind: "current" };
+      case "delete":
+        return { path: conflict.path, kind: "delete" };
+      case "restore": {
+        const history = await this.gitService.history(conflict.path);
+        const latest = history[0];
+        if (!latest) throw new Error(`The server has no committed version of ${conflict.path}. Delete it on the server instead.`);
+        const version = await this.gitService.fileAtVersion(conflict.path, latest.hash);
+        const bytes = Uint8Array.from(atob(version.contentBase64), (char) => char.charCodeAt(0));
+        await this.ensureParentFolder(conflict.path);
+        await this.app.vault.adapter.writeBinary(conflict.path, bytes.buffer);
+        return { path: conflict.path, kind: "current" };
+      }
     }
   }
 
@@ -550,7 +637,7 @@ export class ConflictResolverModal extends Modal {
 
   private updateSyncStatus(): void {
     if (this.syncStateEl) {
-      this.syncStateEl.setText(this.syncRunning ? "Sync is running... actions are available once it finishes." : "");
+      this.syncStateEl.setText(this.syncRunning ? "Sync is running... resolving is available once it finishes." : "");
       this.syncStateEl.style.color = "var(--text-accent)";
       this.syncStateEl.style.display = this.syncRunning ? "" : "none";
     }
@@ -575,16 +662,16 @@ export class ConflictResolverModal extends Modal {
     container: HTMLElement,
     text: string,
     onClick: () => void,
-    options: { primary?: boolean; plain?: boolean } = {}
+    options: { primary?: boolean; plain?: boolean; compact?: boolean } = {}
   ): HTMLButtonElement {
     const button = container.createEl("button", { text, attr: { type: "button" } });
-    button.style.flex = "1 1 auto";
-    button.style.minHeight = "36px";
+    button.style.flex = options.compact ? "0 1 auto" : "1 1 auto";
+    button.style.minHeight = options.compact ? "30px" : "36px";
     button.style.textAlign = "center";
     if (options.primary) button.addClass("mod-cta");
     button.onclick = onClick;
     if (!options.plain) {
-      // Navigation buttons stay usable while a sync runs; buttons that talk to the server do not.
+      // Selection and navigation stay usable while a sync runs; talking to the server does not.
       this.actionButtons.push(button);
       button.disabled = this.syncRunning;
     }
@@ -592,7 +679,20 @@ export class ConflictResolverModal extends Modal {
   }
 }
 
-type Navigation = { returnTo: "list" } | { returnTo: "next"; index: number };
+function isChoiceAvailable(conflict: ConflictFile, choice: FileChoice): boolean {
+  switch (choice.kind) {
+    case "server":
+    case "local":
+    case "custom":
+      return conflict.exists && Boolean(conflict.parsed);
+    case "current":
+      return conflict.exists && !conflict.parsed;
+    case "delete":
+      return !conflict.parsed;
+    case "restore":
+      return !conflict.exists;
+  }
+}
 
 function sideLabel(parsed: ParsedConflictDocument, side: Side): string {
   if (!parsed.generic) return side;

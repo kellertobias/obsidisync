@@ -1290,6 +1290,278 @@ async fn pending_conflict_can_be_resolved_by_deleting_the_file() {
 }
 
 #[tokio::test]
+async fn pending_conflicts_are_reported_to_their_device_until_resolved() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let base = first.server_head.clone();
+    let device_b_first = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_b_first.status, SyncStatus::Ok);
+
+    let device_a = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![upsert("Note.md", b"hello from A\n")],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a.status, SyncStatus::Ok);
+
+    let conflict = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                base_head: base.clone(),
+                changes: vec![upsert("Note.md", b"hello from B\n")],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict.status, SyncStatus::Conflict);
+
+    // Device B syncs again without uploading anything: still a conflict, and no files are sent
+    // back so B's local conflict-marker copy is left alone.
+    let repeat = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                base_head: base.clone(),
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeat.status, SyncStatus::Conflict);
+    assert_eq!(repeat.conflicts.len(), 1);
+    assert_eq!(repeat.conflicts[0].path, "Note.md");
+    assert!(repeat.files.is_empty());
+
+    let listed = service
+        .pending_conflicts_for(USER, VAULT, "device-b")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, "Note.md");
+    assert!(service
+        .pending_conflicts_for(USER, VAULT, "device")
+        .await
+        .unwrap()
+        .is_empty());
+
+    // Device A is not affected by B's pending conflict.
+    let head_after_a = device_a.server_head.clone();
+    let device_a_again = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: head_after_a.clone(),
+                changes: vec![upsert("Other.md", b"other from A\n")],
+                ..empty_sync(head_after_a)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(device_a_again.status, SyncStatus::Ok);
+
+    // Resolving clears it; the resolve response must not hand back other still-pending files.
+    let resolved = service
+        .resolve(
+            USER,
+            VAULT,
+            ResolveRequest {
+                client_id: "device-b".to_string(),
+                device_name: "iPhone".to_string(),
+                files: vec![ResolvedFile {
+                    path: "Note.md".to_string(),
+                    content_base64: Some(STANDARD.encode(b"resolved\n")),
+                    upload_id: None,
+                    delete: false,
+                }],
+                file_content: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, SyncStatus::Ok);
+    let after = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                base_head: resolved.server_head.clone(),
+                ..empty_sync(resolved.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(after.status, SyncStatus::Ok);
+}
+
+#[tokio::test]
+async fn resolve_response_leaves_other_pending_files_out() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("One.md", b"one\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                changes: vec![upsert("Two.md", b"two\n")],
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    let base = first.server_head.clone();
+    service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                ..empty_sync(None)
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: base.clone(),
+                changes: vec![
+                    upsert("One.md", b"one from A\n"),
+                    upsert("Two.md", b"two from A\n"),
+                ],
+                ..empty_sync(base.clone())
+            },
+        )
+        .await
+        .unwrap();
+    let conflict = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                client_id: "device-b".to_string(),
+                base_head: base.clone(),
+                changes: vec![
+                    upsert("One.md", b"one from B\n"),
+                    upsert("Two.md", b"two from B\n"),
+                ],
+                ..empty_sync(base)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(conflict.conflicts.len(), 2);
+
+    let resolved = service
+        .resolve(
+            USER,
+            VAULT,
+            ResolveRequest {
+                client_id: "device-b".to_string(),
+                device_name: "iPhone".to_string(),
+                files: vec![ResolvedFile {
+                    path: "One.md".to_string(),
+                    content_base64: Some(STANDARD.encode(b"one resolved\n")),
+                    upload_id: None,
+                    delete: false,
+                }],
+                file_content: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, SyncStatus::Ok);
+    assert!(
+        !resolved
+            .files
+            .iter()
+            .any(|file| file_path_of(file) == "Two.md"),
+        "Two.md is still pending for this device and must not overwrite its local copy"
+    );
+    assert!(resolved
+        .files
+        .iter()
+        .any(|file| file_path_of(file) == "One.md"));
+}
+
+#[tokio::test]
+async fn legacy_pending_conflict_list_is_reported_to_every_device() {
+    let fixture = GitFixture::new().await;
+    fixture.seed_file("Note.md", b"hello\n").await;
+    let service = VaultService::new_for_tests(fixture.root.path().join("data"));
+    service
+        .register(USER, VAULT, register_request(&fixture.remote))
+        .await
+        .unwrap();
+    let first = service.sync(USER, VAULT, empty_sync(None)).await.unwrap();
+    let vault_dir = fixture.root.path().join("data/users/alice/vaults/notes");
+    fs::write(
+        vault_dir.join("pending-conflicts.json"),
+        b"[\n  \"Note.md\"\n]",
+    )
+    .await
+    .unwrap();
+
+    let listed = service
+        .pending_conflicts_for(USER, VAULT, "any-device")
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, "Note.md");
+
+    let sync = service
+        .sync(
+            USER,
+            VAULT,
+            SyncRequest {
+                base_head: first.server_head.clone(),
+                ..empty_sync(first.server_head.clone())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(sync.status, SyncStatus::Conflict);
+    assert_eq!(sync.conflicts[0].path, "Note.md");
+}
+
+#[tokio::test]
 async fn brand_new_file_does_not_conflict_when_device_never_touched_the_path() {
     let fixture = GitFixture::new().await;
     fixture.seed_file("Existing.md", b"seed\n").await;

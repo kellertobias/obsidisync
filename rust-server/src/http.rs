@@ -199,6 +199,10 @@ pub fn router_with_webdav_limit(
         .route("/v1/users/:user/vaults/:vault/resolve", post(resolve))
         .route("/v1/users/:user/vaults/:vault/devices", get(devices))
         .route(
+            "/v1/users/:user/vaults/:vault/conflicts",
+            get(pending_conflicts),
+        )
+        .route(
             "/v1/users/:user/vaults/:vault/files/device-versions",
             get(device_versions),
         )
@@ -862,6 +866,27 @@ async fn devices(
 ) -> Result<Json<Vec<DeviceEntry>>, ApiError> {
     authorize(&state, &headers, &user).await?;
     Ok(Json(state.vaults.list_devices(&user, &vault).await?))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingConflictsQuery {
+    client_id: String,
+}
+
+async fn pending_conflicts(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Query(query): Query<PendingConflictsQuery>,
+) -> Result<Json<Vec<SyncConflict>>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    Ok(Json(
+        state
+            .vaults
+            .pending_conflicts_for(&user, &vault, &query.client_id)
+            .await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]

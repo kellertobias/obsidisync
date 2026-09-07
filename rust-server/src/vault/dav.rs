@@ -406,13 +406,13 @@ impl VaultService {
         if state.uses_remote() {
             self.fetch(repo).await?;
             if let Some(conflicts) = self.rebase_remote(repo, &state.branch).await? {
-                self.record_pending_conflicts(user, vault, &conflicts)
+                self.record_pending_conflicts(user, vault, &device.client_id, &conflicts)
                     .await?;
                 self.cleanup_conflict_state(repo).await?;
                 bail!("conflict: remote changes conflict with this upload; resolve from Obsidian");
             }
             if let Some(conflicts) = self.push_after_rebase(repo, &state.branch).await? {
-                self.record_pending_conflicts(user, vault, &conflicts)
+                self.record_pending_conflicts(user, vault, &device.client_id, &conflicts)
                     .await?;
                 self.cleanup_conflict_state(repo).await?;
                 bail!("conflict: remote changes conflict with this upload; resolve from Obsidian");
