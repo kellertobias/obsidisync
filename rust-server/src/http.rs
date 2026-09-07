@@ -4,6 +4,7 @@ use crate::device_passwords::{
     CreateDevicePasswordRequest, CreatedDevicePassword, DevicePasswordEntry, DevicePasswordStore,
 };
 use crate::nextcloud::LoginFlowStore;
+use crate::oidc_login::OidcLoginStore;
 use crate::protocol::*;
 use crate::saber::sync::{SaberRenderer, DEFAULT_RENDER_DELAY};
 use crate::vault::VaultService;
@@ -43,6 +44,8 @@ pub struct AppState {
     pub saber: Arc<SaberRenderer>,
     /// Pending Nextcloud Login Flow v2 sessions started by the Saber app.
     pub login_flows: Arc<LoginFlowStore>,
+    /// Pending browser logins through the OIDC issuer.
+    pub oidc_login: Arc<OidcLoginStore>,
 }
 
 impl AppState {
@@ -58,6 +61,7 @@ impl AppState {
             webdav_max_body_bytes: DEFAULT_WEBDAV_MAX_BODY_BYTES,
             saber,
             login_flows: Arc::new(LoginFlowStore::default()),
+            oidc_login: Arc::new(OidcLoginStore::default()),
         }
     }
 
@@ -240,6 +244,7 @@ pub fn router_with_webdav_limit(
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .merge(webdav)
         .merge(crate::nextcloud::router())
+        .merge(crate::oidc_login::router())
         .with_state(Arc::new(state));
 
     apply_cors(router, allowed_origins)
@@ -333,7 +338,7 @@ struct LoginPageQuery {
 }
 
 /// Only same-site paths are followed after login, never absolute URLs.
-fn safe_next_path(next: Option<&str>) -> Option<String> {
+pub(crate) fn safe_next_path(next: Option<&str>) -> Option<String> {
     let next = next?.trim();
     if next.starts_with('/') && !next.starts_with("//") && !next.contains(['\r', '\n']) {
         Some(next.to_string())
@@ -357,9 +362,16 @@ struct RefreshSessionRequest {
 async fn password_page(
     State(state): State<Arc<AppState>>,
     Query(query): Query<LoginPageQuery>,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
+    if matches!(state.public_auth, PublicAuthConfig::Oidc { .. }) {
+        let next =
+            safe_next_path(query.next.as_deref()).unwrap_or_else(|| "/change-feed".to_string());
+        return Ok(
+            axum::response::Redirect::to(&crate::oidc_login::start_url(&next)).into_response(),
+        );
+    }
     if !matches!(state.public_auth, PublicAuthConfig::Password) {
-        return Ok(Html(render_home_page(&state.public_auth)));
+        return Ok(Html(render_home_page(&state.public_auth)).into_response());
     }
     let configured = state.auth.password_is_configured().await?;
     let setup_token_required = state.auth.password_setup_token_is_required()?;
@@ -370,7 +382,8 @@ async fn password_page(
         None,
         &[],
         safe_next_path(query.next.as_deref()).as_deref(),
-    )))
+    ))
+    .into_response())
 }
 
 async fn password_form(
@@ -1041,7 +1054,11 @@ async fn authorize(
     Ok(())
 }
 
-fn redirect_with_site_session(location: &str, access_token: &str, secure: bool) -> Response {
+pub(crate) fn redirect_with_site_session(
+    location: &str,
+    access_token: &str,
+    secure: bool,
+) -> Response {
     let secure_attribute = if secure { "; Secure" } else { "" };
     (
         StatusCode::SEE_OTHER,
@@ -1059,7 +1076,7 @@ fn redirect_with_site_session(location: &str, access_token: &str, secure: bool) 
         .into_response()
 }
 
-fn site_session_cookie_is_secure(headers: &HeaderMap) -> bool {
+pub(crate) fn site_session_cookie_is_secure(headers: &HeaderMap) -> bool {
     header_contains_token(headers, "x-forwarded-proto", "https")
         || header_contains_token(headers, "x-forwarded-ssl", "on")
         || headers

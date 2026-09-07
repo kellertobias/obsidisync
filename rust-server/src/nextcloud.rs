@@ -33,10 +33,11 @@ use tokio::sync::Mutex;
 /// How long the app has to complete the browser part of the login.
 const LOGIN_FLOW_TTL: Duration = Duration::from_secs(20 * 60);
 const MAX_PENDING_FLOWS: usize = 200;
-/// Default vault folder for Saber's encrypted files.
-pub const DEFAULT_SYNC_FOLDER: &str = "Saber/Sync";
+/// Default vault folder for Saber's encrypted files: a dot-folder below the PDF folder, so
+/// Obsidian's file explorer hides the encrypted blobs while the PDFs sit next to them.
+pub const DEFAULT_SYNC_FOLDER: &str = "Tablet/.sync";
 /// Default vault folder for the rendered PDFs.
-pub const DEFAULT_PDF_FOLDER: &str = "Saber";
+pub const DEFAULT_PDF_FOLDER: &str = "Tablet";
 /// Nextcloud version reported by `status.php`; Saber does not check it, but the client library
 /// wants something parseable.
 const FAKE_NEXTCLOUD_VERSION: &str = "29.0.0.0";
@@ -239,18 +240,37 @@ async fn login_flow_page(
             .into_response();
     }
     let session_user = session_user(&state, &headers).await;
-    if session_user.is_none() && matches!(state.public_auth, PublicAuthConfig::Password) {
+    if session_user.is_none() {
         let next = format!("/index.php/login/v2/flow/{token}");
-        return Redirect::to(&format!("/login?next={}", urlencode(&next))).into_response();
+        match &state.public_auth {
+            PublicAuthConfig::Password => {
+                return Redirect::to(&format!("/login?next={}", urlencode(&next))).into_response();
+            }
+            PublicAuthConfig::Oidc { .. } => {
+                return Redirect::to(&crate::oidc_login::start_url(&next)).into_response();
+            }
+            PublicAuthConfig::Token => {}
+        }
     }
-    let vaults = match &session_user {
-        Some(user) => state.vaults.list_vaults(user).await.unwrap_or_default(),
-        None => Vec::new(),
+    let (vaults, default_vault) = match &session_user {
+        Some(user) => (
+            state.vaults.list_vaults(user).await.unwrap_or_default(),
+            state.vaults.default_vault(user).await.ok().flatten(),
+        ),
+        None => (Vec::new(), None),
     };
+    if session_user.is_some() && vaults.is_empty() {
+        return Html(render_message_page(
+            "No vault yet",
+            "Sync a vault from Obsidian with this account first, then start the Saber login again.",
+        ))
+        .into_response();
+    }
     Html(render_flow_page(
         &token,
         session_user.as_deref(),
         &vaults,
+        default_vault.as_deref(),
         &state.public_auth,
         query.error.as_deref(),
     ))
@@ -261,6 +281,7 @@ async fn login_flow_page(
 struct FlowForm {
     #[serde(default)]
     access_token: String,
+    #[serde(default)]
     vault: String,
     #[serde(default)]
     label: String,
@@ -305,8 +326,18 @@ async fn login_flow_submit(
         );
     };
 
-    let vault = form.vault.trim().to_string();
-    if !state.vaults.is_registered(&user, &vault).await {
+    // The user's default vault unless the form explicitly named another registered one.
+    let vault = match form.vault.trim() {
+        "" => state
+            .vaults
+            .default_vault(&user)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default(),
+        named => named.to_string(),
+    };
+    if vault.is_empty() || !state.vaults.is_registered(&user, &vault).await {
         return flow_error(
             &token,
             "Unknown vault. Sync the vault from Obsidian once before connecting Saber.",
@@ -594,6 +625,7 @@ fn render_flow_page(
     token: &str,
     user: Option<&str>,
     vaults: &[String],
+    default_vault: Option<&str>,
     public_auth: &PublicAuthConfig,
     error: Option<&str>,
 ) -> String {
@@ -617,14 +649,28 @@ fn render_flow_page(
             )
         }
     };
-    let vault_html = if vaults.is_empty() {
-        r#"<label>Vault<span class="muted">The vault name used in the Obsidian plugin.</span><input name="vault" type="text" required></label>"#.to_string()
-    } else {
-        let options = vaults
-            .iter()
-            .map(|vault| format!(r#"<option value="{0}">{0}</option>"#, escape_html(vault)))
-            .collect::<String>();
-        format!(r#"<label>Vault<select name="vault">{options}</select></label>"#)
+    let default_vault = default_vault.or(vaults.first().map(String::as_str));
+    let vault_html = match (vaults.len(), default_vault) {
+        (0, _) | (_, None) => {
+            r#"<label>Vault<span class="muted">The vault name used in the Obsidian plugin.</span><input name="vault" type="text" required></label>"#.to_string()
+        }
+        (1, Some(vault)) => format!(
+            r#"<p class="muted">Vault: <strong>{0}</strong></p><input type="hidden" name="vault" value="{0}">"#,
+            escape_html(vault)
+        ),
+        (_, Some(default)) => {
+            let options = vaults
+                .iter()
+                .map(|vault| {
+                    format!(
+                        r#"<option value="{0}"{1}>{0}</option>"#,
+                        escape_html(vault),
+                        if vault == default { " selected" } else { "" }
+                    )
+                })
+                .collect::<String>();
+            format!(r#"<label>Vault<span class="muted">Your most recently synced vault is preselected.</span><select name="vault">{options}</select></label>"#)
+        }
     };
     let body = format!(
         r#"<h1>Connect Saber</h1>

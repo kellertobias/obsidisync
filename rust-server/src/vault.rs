@@ -667,6 +667,15 @@ impl VaultService {
         Ok(names)
     }
 
+    /// The vault a user most recently synced, falling back to the first by name. Used where a
+    /// browser page has to pick a vault without asking.
+    pub async fn default_vault(&self, user: &str) -> Result<Option<String>> {
+        if let Some(entry) = self.activity_feed(user, 1).await?.into_iter().next() {
+            return Ok(Some(entry.vault));
+        }
+        Ok(self.list_vaults(user).await?.into_iter().next())
+    }
+
     pub async fn activity_feed(&self, user: &str, limit: usize) -> Result<Vec<ActivityFeedEntry>> {
         let user = validate_slug(user, "user")?;
         let mut entries = Vec::new();

@@ -6,6 +6,7 @@ pub mod device_passwords;
 pub mod git;
 pub mod http;
 pub mod nextcloud;
+pub mod oidc_login;
 pub mod password_auth;
 pub mod paths;
 pub mod protocol;

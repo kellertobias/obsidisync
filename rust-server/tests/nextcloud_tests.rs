@@ -70,8 +70,8 @@ async fn saber_password(state: &AppState, encryption_password: &str) -> String {
             "notes",
             CreateSaberDevice {
                 label: "Saber on iPad".to_string(),
-                folder: "Saber/Sync".to_string(),
-                pdf_folder: "Saber".to_string(),
+                folder: "Tablet/.sync".to_string(),
+                pdf_folder: "Tablet".to_string(),
                 encryption_password: encryption_password.to_string(),
             },
         )
@@ -280,7 +280,7 @@ async fn login_flow_issues_a_saber_device_password() {
         ("access_token", "secret"),
         ("vault", "notes"),
         ("label", "Saber on iPad"),
-        ("folder", "Saber/Sync"),
+        ("folder", "Tablet/.sync"),
         ("pdf_folder", "Saber"),
         ("encryption_password", ENC_PASSWORD),
     ])
@@ -518,7 +518,7 @@ async fn webdav_exposes_the_granted_folder_as_saber() {
     // The file landed in the vault at the granted folder.
     let entry = state
         .vaults
-        .dav_stat("alice", "notes", "Saber/Sync/config.sbc")
+        .dav_stat("alice", "notes", "Tablet/.sync/config.sbc")
         .await
         .unwrap()
         .unwrap();
@@ -564,7 +564,7 @@ async fn encrypted_notes_become_pdfs_and_deletions_remove_them() {
 
     let (entry, pdf) = state
         .vaults
-        .dav_read("alice", "notes", "Saber/Uni/Lecture 1.pdf")
+        .dav_read("alice", "notes", "Tablet/Uni/Lecture 1.pdf")
         .await
         .expect("PDF rendered into the vault");
     assert!(
@@ -586,7 +586,7 @@ async fn encrypted_notes_become_pdfs_and_deletions_remove_them() {
     // The encrypted originals stay in the sync folder for Saber's own multi-device sync.
     let listing = state
         .vaults
-        .dav_list("alice", "notes", "Saber/Sync")
+        .dav_list("alice", "notes", "Tablet/.sync")
         .await
         .unwrap();
     assert_eq!(listing.len(), 4, "{listing:?}");
@@ -595,7 +595,7 @@ async fn encrypted_notes_become_pdfs_and_deletions_remove_them() {
     let response = request(
         &app,
         "GET",
-        "/v1/users/alice/vaults/notes/history?path=Saber/Uni/Lecture%201.pdf",
+        "/v1/users/alice/vaults/notes/history?path=Tablet/Uni/Lecture%201.pdf",
         Some(BEARER),
         &[],
         vec![],
@@ -619,7 +619,7 @@ async fn encrypted_notes_become_pdfs_and_deletions_remove_them() {
     state.saber.wait_idle().await;
     let (entry_again, _) = state
         .vaults
-        .dav_read("alice", "notes", "Saber/Uni/Lecture 1.pdf")
+        .dav_read("alice", "notes", "Tablet/Uni/Lecture 1.pdf")
         .await
         .unwrap();
     assert_eq!(entry_again.etag, entry.etag);
@@ -632,7 +632,7 @@ async fn encrypted_notes_become_pdfs_and_deletions_remove_them() {
     state.saber.wait_idle().await;
     assert!(state
         .vaults
-        .dav_stat("alice", "notes", "Saber/Uni/Lecture 1.pdf")
+        .dav_stat("alice", "notes", "Tablet/Uni/Lecture 1.pdf")
         .await
         .unwrap()
         .is_none());
@@ -667,13 +667,13 @@ async fn wrong_encryption_password_stores_files_without_rendering() {
 
     let listing = state
         .vaults
-        .dav_list("alice", "notes", "Saber/Sync")
+        .dav_list("alice", "notes", "Tablet/.sync")
         .await
         .unwrap();
     assert_eq!(listing.len(), 2);
     assert!(state
         .vaults
-        .dav_stat("alice", "notes", "Saber/Note.pdf")
+        .dav_stat("alice", "notes", "Tablet/Note.pdf")
         .await
         .unwrap()
         .is_none());
@@ -685,7 +685,7 @@ async fn wrong_encryption_password_stores_files_without_rendering() {
         .unwrap();
     let error = state
         .saber
-        .render_paths(&grant, &[format!("Saber/Sync/{note_name}")])
+        .render_paths(&grant, &[format!("Tablet/.sync/{note_name}")])
         .await
         .unwrap_err();
     assert!(
@@ -858,10 +858,15 @@ async fn password_mode_sends_the_browser_through_login_and_back() {
         page.contains("Signed in as <strong>alice</strong>"),
         "{page}"
     );
-    assert!(page.contains("<option value=\"notes\">"), "{page}");
+    // One vault: it is fixed, not offered as a choice.
+    assert!(
+        page.contains("<input type=\"hidden\" name=\"vault\" value=\"notes\">"),
+        "{page}"
+    );
     assert!(!page.contains("name=\"access_token\""));
 
-    let form = serde_urlencoded::to_string([("vault", "notes"), ("label", "Saber")]).unwrap();
+    // No vault in the form: the default vault is used.
+    let form = serde_urlencoded::to_string([("label", "Saber")]).unwrap();
     let response = request(
         &app,
         "POST",
@@ -878,6 +883,117 @@ async fn password_mode_sends_the_browser_through_login_and_back() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(text(response).await.contains("Saber is connected"));
     let entries = state.device_passwords.list("alice", "notes").await.unwrap();
-    assert_eq!(entries[0].folder, "Saber/Sync");
-    assert_eq!(entries[0].pdf_folder.as_deref(), Some("Saber"));
+    assert_eq!(entries[0].folder, "Tablet/.sync");
+    assert_eq!(entries[0].pdf_folder.as_deref(), Some("Tablet"));
+}
+
+#[tokio::test]
+async fn oidc_mode_sends_the_browser_to_the_issuer() {
+    // A tiny stand-in issuer serving only the discovery document.
+    let issuer_app = axum::Router::new().route(
+        "/.well-known/openid-configuration",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "authorization_endpoint": "https://idp.example/oauth/v2/authorize",
+                "token_endpoint": "https://idp.example/oauth/v2/token"
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, issuer_app).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(
+        VaultService::new(dir.path().join("data")),
+        AuthVerifier::StaticTokenForDev {
+            token: "secret".to_string(),
+            user: "alice".to_string(),
+        },
+        PublicAuthConfig::Oidc {
+            issuer: issuer.clone(),
+            client_id: "obsync-client".to_string(),
+            scope: "openid profile".to_string(),
+            audience: None,
+        },
+    );
+    let app = app(&state);
+
+    let init = json(
+        request(
+            &app,
+            "POST",
+            "/index.php/login/v2",
+            None,
+            &[("host", "h")],
+            vec![],
+        )
+        .await,
+    )
+    .await;
+    let flow_path = init["login"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("http://h")
+        .to_string();
+    let response = request(&app, "GET", &flow_path, None, &[], vec![]).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let start = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        start.starts_with("/login/oidc/start?next=%2Findex%2Ephp"),
+        "{start}"
+    );
+
+    let response = request(&app, "GET", "/login?next=/change-feed", None, &[], vec![]).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        "/login/oidc/start?next=%2Fchange%2Dfeed"
+    );
+
+    let response = request(
+        &app,
+        "GET",
+        &start,
+        None,
+        &[
+            ("host", "sync.example.test"),
+            ("x-forwarded-proto", "https"),
+        ],
+        vec![],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(location.starts_with("https://idp.example/oauth/v2/authorize?response_type=code&client_id=obsync-client&redirect_uri=https%3A%2F%2Fsync.example.test%2Flogin%2Foidc%2Fcallback&scope=openid+profile&state="), "{location}");
+    assert!(location.contains("&code_challenge_method=S256"));
+
+    // A callback with an unknown state is rejected without contacting the issuer.
+    let response = request(
+        &app,
+        "GET",
+        "/login/oidc/callback?code=abc&state=nope",
+        None,
+        &[],
+        vec![],
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(text(response).await.contains("unknown or expired"));
+    let response = request(
+        &app,
+        "GET",
+        "/login/oidc/callback?error=access_denied",
+        None,
+        &[],
+        vec![],
+    )
+    .await;
+    assert!(text(response).await.contains("access_denied"));
 }
