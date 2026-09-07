@@ -1186,6 +1186,35 @@ async fn tagged_notes_push_their_pdfs_into_saber() {
         .unwrap();
     assert_eq!(entry_after.etag, entry_before.etag);
 
+    // A note inside the PDF folder needs no tag; PDFs in that folder are never pushed.
+    sync_upserts(
+        &app,
+        &[
+            ("Papers/Attention.pdf", pdf.as_slice()),
+            ("Tablet/Rendered.pdf", pdf.as_slice()),
+            (
+                "Tablet/Tablet.md",
+                b"On the tablet:\n- [[Attention.pdf]]\n- [[Rendered.pdf]]\n",
+            ),
+        ],
+    )
+    .await;
+    state.tablet.wait_idle().await;
+    let attention = cipher.encrypt_file_name("/Papers/Attention.sbn2");
+    assert!(state
+        .vaults
+        .dav_stat("alice", "notes", &format!("Tablet/.sync/{attention}"))
+        .await
+        .unwrap()
+        .is_some());
+    let rendered = cipher.encrypt_file_name("/Tablet/Rendered.sbn2");
+    assert!(state
+        .vaults
+        .dav_stat("alice", "notes", &format!("Tablet/.sync/{rendered}"))
+        .await
+        .unwrap()
+        .is_none());
+
     // Removing the tag forgets the PDF; tagging again pushes it afresh.
     sync_upserts(
         &app,

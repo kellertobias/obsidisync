@@ -1,7 +1,9 @@
 //! Pushes PDFs from the vault into Saber.
 //!
-//! When a markdown note carries the `#tablet` tag (in its body or in frontmatter `tags`), every
-//! PDF it links or embeds is turned into a Saber note: one page per PDF page with the PDF as the
+//! When a markdown note carries the `#tablet` tag (in its body or in frontmatter `tags`), or
+//! lives inside a Saber device's PDF folder (`Tablet/` by default, so a note like
+//! `Tablet/Tablet.md` can simply list what belongs on the tablet), every PDF it links or embeds
+//! is turned into a Saber note: one page per PDF page with the PDF as the
 //! page background, exactly what Saber's own "import PDF" produces. The note and its single PDF
 //! asset are encrypted with the device's key and written into the Saber sync folder, mirroring
 //! the vault path (`Uni/Slides.pdf` becomes `Uni/Slides.sbn2` in Saber). Saber downloads them on
@@ -144,9 +146,14 @@ impl TabletPusher {
             return Ok(PushReport::default());
         }
         let all_paths = self.vaults.list_tracked_paths(user, vault).await?;
+        // PDF folders hold Saber's own rendered output; never push those back.
+        let list_folders: Vec<String> = grants
+            .iter()
+            .filter_map(|grant| grant.saber.as_ref().map(|saber| saber.pdf_folder.clone()))
+            .collect();
         let pdfs: Vec<String> = all_paths
             .iter()
-            .filter(|path| is_pdf(path))
+            .filter(|path| is_pdf(path) && !under_any(path, &list_folders))
             .cloned()
             .collect();
 
@@ -182,7 +189,8 @@ impl TabletPusher {
                 Some(bytes) => String::from_utf8_lossy(&bytes).to_string(),
                 None => String::new(),
             };
-            let tagged = !content.is_empty() && has_tag(&content, TAG);
+            let tagged =
+                !content.is_empty() && (has_tag(&content, TAG) || under_any(note, &list_folders));
             if !tagged {
                 if let Some(previous) = state.notes.remove(note) {
                     // The note lost its tag (or was deleted): forget its PDFs unless another
@@ -335,6 +343,12 @@ async fn write_state(path: &std::path::Path, state: &PushState) -> Result<()> {
     tokio::fs::write(&temp, serde_json::to_vec_pretty(state)?).await?;
     tokio::fs::rename(temp, path).await?;
     Ok(())
+}
+
+fn under_any(path: &str, folders: &[String]) -> bool {
+    folders
+        .iter()
+        .any(|folder| path.starts_with(&format!("{folder}/")))
 }
 
 fn is_markdown(path: &str) -> bool {
