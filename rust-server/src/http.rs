@@ -1066,8 +1066,11 @@ pub(crate) fn redirect_with_site_session(
             (header::LOCATION, location.to_string()),
             (
                 header::SET_COOKIE,
+                // Lax, not Strict: after an OIDC login the browser arrives here through a
+                // cross-site redirect from the issuer, and Strict cookies are withheld on the
+                // navigations that follow it, which would loop the login forever.
                 format!(
-                    "{SITE_SESSION_COOKIE}={}; Path=/; Max-Age={SITE_SESSION_COOKIE_MAX_AGE_SECONDS}; HttpOnly; SameSite=Strict{secure_attribute}",
+                    "{SITE_SESSION_COOKIE}={}; Path=/; Max-Age={SITE_SESSION_COOKIE_MAX_AGE_SECONDS}; HttpOnly; SameSite=Lax{secure_attribute}",
                     cookie_encode(access_token),
                 ),
             ),

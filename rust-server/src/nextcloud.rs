@@ -83,11 +83,18 @@ impl LoginFlowStore {
         Ok((flow_token, poll_token))
     }
 
-    async fn is_pending(&self, flow_token: &str) -> bool {
+    async fn status(&self, flow_token: &str) -> FlowStatus {
         let flows = self.flows.lock().await;
-        flows
-            .get(flow_token)
-            .is_some_and(|flow| flow.credentials.is_none() && !flow.is_expired())
+        match flows.get(flow_token) {
+            Some(flow) if flow.is_expired() => FlowStatus::Missing,
+            Some(flow) if flow.credentials.is_some() => FlowStatus::Completed,
+            Some(_) => FlowStatus::Pending,
+            None => FlowStatus::Missing,
+        }
+    }
+
+    async fn is_pending(&self, flow_token: &str) -> bool {
+        self.status(flow_token).await == FlowStatus::Pending
     }
 
     async fn complete(&self, flow_token: &str, credentials: FlowCredentials) -> bool {
@@ -116,6 +123,13 @@ impl LoginFlowStore {
         flow.credentials.as_ref()?;
         flows.remove(&key).and_then(|flow| flow.credentials)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlowStatus {
+    Pending,
+    Completed,
+    Missing,
 }
 
 impl LoginFlow {
@@ -229,15 +243,25 @@ async fn login_flow_page(
     AxumPath(token): AxumPath<String>,
     Query(query): Query<FlowQuery>,
 ) -> Response {
-    if !state.login_flows.is_pending(&token).await {
-        return (
-            StatusCode::NOT_FOUND,
-            Html(render_message_page(
-                "Login link expired",
-                "This Saber login link is no longer valid. Start the login again in Saber.",
-            )),
-        )
+    match state.login_flows.status(&token).await {
+        FlowStatus::Pending => {}
+        FlowStatus::Completed => {
+            return Html(render_message_page(
+                "Saber is already connected",
+                "This login was completed. Return to Saber; it picks up the login by itself. If Saber still shows the login screen, start the login again.",
+            ))
             .into_response();
+        }
+        FlowStatus::Missing => {
+            return (
+                StatusCode::NOT_FOUND,
+                Html(render_message_page(
+                    "Login link expired",
+                    "This Saber login link is no longer valid (links last 20 minutes). Start the login again in Saber.",
+                )),
+            )
+                .into_response();
+        }
     }
     let session_user = session_user(&state, &headers).await;
     if session_user.is_none() {
