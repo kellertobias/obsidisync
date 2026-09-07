@@ -192,13 +192,7 @@ impl SaberRenderer {
         grant: &DeviceGrant,
         password: &str,
     ) -> Result<Option<SaberCipher>> {
-        let config_path = format!("{}/{CONFIG_FILE_NAME}", grant.folder);
-        let Some(config) = self.read_optional(grant, &config_path).await? else {
-            return Ok(None);
-        };
-        SaberCipher::from_config(password, &config)
-            .map(Some)
-            .context("saber encryption password check failed")
+        load_cipher(&self.vaults, grant, password).await
     }
 
     async fn render_note(
@@ -288,6 +282,29 @@ impl SaberRenderer {
 enum NoteOutcome {
     Rendered(String),
     Deleted(String),
+}
+
+/// Builds the device's cipher from the `config.sbc` Saber uploaded into its sync folder.
+/// Returns `None` while that file does not exist yet (Saber writes it on its first sync).
+pub async fn load_cipher(
+    vaults: &VaultService,
+    grant: &DeviceGrant,
+    password: &str,
+) -> Result<Option<SaberCipher>> {
+    let config_path = format!("{}/{CONFIG_FILE_NAME}", grant.folder);
+    let exists = vaults
+        .dav_stat(&grant.user, &grant.vault, &config_path)
+        .await?
+        .is_some_and(|entry| !entry.is_dir);
+    if !exists {
+        return Ok(None);
+    }
+    let (_, config) = vaults
+        .dav_read(&grant.user, &grant.vault, &config_path)
+        .await?;
+    SaberCipher::from_config(password, &config)
+        .map(Some)
+        .context("saber encryption password check failed")
 }
 
 /// Maps any Saber file path (`/a/b.sbn2`, `/a/b.sbn2.3` asset, `/a/b.sbn2.p` preview) to the

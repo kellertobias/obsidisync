@@ -259,6 +259,29 @@ impl DevicePasswordStore {
             .collect())
     }
 
+    /// Saber devices of a vault whose notes the server may decrypt (encryption password set).
+    pub async fn saber_grants(&self, user: &str, vault: &str) -> Result<Vec<DeviceGrant>> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        let store = self.read_store().await?;
+        Ok(store
+            .passwords
+            .iter()
+            .filter(|record| record.user == user && record.vault == vault)
+            .filter(|record| record.kind == DeviceKind::Saber)
+            .map(|record| DeviceGrant {
+                id: record.id.clone(),
+                user: record.user.clone(),
+                vault: record.vault.clone(),
+                folder: record.folder.clone(),
+                label: record.label.clone(),
+                kind: record.kind,
+                saber: record.saber.clone(),
+            })
+            .filter(|grant| grant.saber_rendering().is_some())
+            .collect())
+    }
+
     /// Removes the password. Returns `false` when no password with that id belongs to the user.
     pub async fn revoke(&self, user: &str, vault: &str, id: &str) -> Result<bool> {
         let user = validate_slug(user, "user")?;

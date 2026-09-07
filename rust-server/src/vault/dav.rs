@@ -119,6 +119,28 @@ impl VaultService {
         .await
     }
 
+    /// Every file path in the vault: text files tracked by git plus binary manifest entries.
+    pub async fn list_tracked_paths(&self, user: &str, vault: &str) -> Result<Vec<String>> {
+        let user = validate_slug(user, "user")?;
+        let vault = validate_slug(vault, "vault")?;
+        self.with_lock(&user, &vault, || async {
+            self.read_registered_state(&user, &vault).await?;
+            let repo = self.repo_dir(&user, &vault);
+            let manifest = read_manifest(&repo).await?;
+            let mut paths: Vec<String> = if fs::metadata(repo.join(".git")).await.is_ok() {
+                split_nul(&git(Some(&repo), &["ls-files", "-z"], &[0]).await?.stdout)
+            } else {
+                Vec::new()
+            };
+            paths.retain(|path| !is_hidden_path(path) && !manifest.files.contains_key(path));
+            paths.extend(manifest.files.keys().cloned());
+            paths.sort();
+            paths.dedup();
+            Ok(paths)
+        })
+        .await
+    }
+
     /// Allocates a scratch file inside the vault's upload directory. Callers stream a request
     /// body into it and then hand it to `dav_write_from_file`, so large PDFs never sit in memory.
     pub async fn dav_stage_upload(&self, user: &str, vault: &str) -> Result<PathBuf> {

@@ -6,6 +6,7 @@ use crate::device_passwords::{
 use crate::nextcloud::LoginFlowStore;
 use crate::oidc_login::OidcLoginStore;
 use crate::protocol::*;
+use crate::saber::push::{TabletPusher, DEFAULT_PUSH_DELAY};
 use crate::saber::sync::{SaberRenderer, DEFAULT_RENDER_DELAY};
 use crate::vault::VaultService;
 use axum::extract::{DefaultBodyLimit, Form, Path, Query, State};
@@ -42,6 +43,8 @@ pub struct AppState {
     pub webdav_max_body_bytes: usize,
     /// Renders Saber uploads to PDFs in the background.
     pub saber: Arc<SaberRenderer>,
+    /// Pushes `#tablet`-tagged PDFs into Saber in the background.
+    pub tablet: Arc<TabletPusher>,
     /// Pending Nextcloud Login Flow v2 sessions started by the Saber app.
     pub login_flows: Arc<LoginFlowStore>,
     /// Pending browser logins through the OIDC issuer.
@@ -52,6 +55,11 @@ impl AppState {
     pub fn new(vaults: VaultService, auth: AuthVerifier, public_auth: PublicAuthConfig) -> Self {
         let device_passwords = Arc::new(DevicePasswordStore::new(vaults.data_dir.clone()));
         let saber = SaberRenderer::new(vaults.clone(), DEFAULT_RENDER_DELAY);
+        let tablet = TabletPusher::new(
+            vaults.clone(),
+            Arc::clone(&device_passwords),
+            DEFAULT_PUSH_DELAY,
+        );
         Self {
             vaults,
             auth,
@@ -60,6 +68,7 @@ impl AppState {
             webdav_throttle: Arc::new(AuthThrottle::new()),
             webdav_max_body_bytes: DEFAULT_WEBDAV_MAX_BODY_BYTES,
             saber,
+            tablet,
             login_flows: Arc::new(LoginFlowStore::default()),
             oidc_login: Arc::new(OidcLoginStore::default()),
         }
@@ -68,6 +77,11 @@ impl AppState {
     /// Changes how long the Saber renderer waits for related uploads before rendering.
     pub fn with_saber_render_delay(mut self, delay: std::time::Duration) -> Self {
         self.saber = SaberRenderer::new(self.vaults.clone(), delay);
+        self.tablet = TabletPusher::new(
+            self.vaults.clone(),
+            Arc::clone(&self.device_passwords),
+            delay,
+        );
         self
     }
 }
@@ -814,7 +828,16 @@ async fn sync(
     Json(request): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
-    Ok(Json(state.vaults.sync(&user, &vault, request).await?))
+    let changed: Vec<String> = request
+        .changes
+        .iter()
+        .map(|change| match change {
+            ClientChange::Upsert { path, .. } | ClientChange::Delete { path } => path.clone(),
+        })
+        .collect();
+    let response = state.vaults.sync(&user, &vault, request).await?;
+    state.tablet.schedule(&user, &vault, changed);
+    Ok(Json(response))
 }
 
 async fn init_upload(

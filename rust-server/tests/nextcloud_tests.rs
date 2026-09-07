@@ -1032,3 +1032,187 @@ async fn oidc_mode_sends_the_browser_to_the_issuer() {
     .await;
     assert!(text(response).await.contains("access_denied"));
 }
+
+fn two_page_pdf() -> Vec<u8> {
+    use pdf_writer::{Pdf, Rect, Ref};
+    let mut pdf = Pdf::new();
+    let catalog = Ref::new(1);
+    let tree = Ref::new(2);
+    let page_a = Ref::new(3);
+    let page_b = Ref::new(4);
+    pdf.catalog(catalog).pages(tree);
+    pdf.pages(tree).kids([page_a, page_b]).count(2);
+    pdf.page(page_a)
+        .parent(tree)
+        .media_box(Rect::new(0.0, 0.0, 595.0, 842.0));
+    pdf.page(page_b)
+        .parent(tree)
+        .media_box(Rect::new(0.0, 0.0, 595.0, 842.0));
+    pdf.finish()
+}
+
+async fn sync_upserts(app: &axum::Router, files: &[(&str, &[u8])]) {
+    use obsidian_git_sync_server::protocol::{ClientChange, SyncRequest};
+    let changes = files
+        .iter()
+        .map(|(path, content)| ClientChange::Upsert {
+            path: path.to_string(),
+            content_base64: Some(STANDARD.encode(content)),
+            upload_id: None,
+            sha256: None,
+            mtime: Some(1),
+        })
+        .collect();
+    let response = request(
+        app,
+        "POST",
+        "/v1/users/alice/vaults/notes/sync",
+        Some(BEARER),
+        &[("content-type", "application/json")],
+        serde_json::to_vec(&SyncRequest {
+            base_head: None,
+            client_id: "laptop".to_string(),
+            device_name: "Laptop".to_string(),
+            changes,
+            client_manifest: vec![],
+            file_content: Default::default(),
+        })
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn tagged_notes_push_their_pdfs_into_saber() {
+    use obsidian_git_sync_server::saber::sbn::Note;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path());
+    let app = app(&state);
+    register(&app).await;
+    let password = saber_password(&state, ENC_PASSWORD).await;
+    let auth = basic("alice", &password);
+    let cipher = cipher();
+    assert_eq!(
+        put_saber_file(&app, &auth, "config.sbc", config_sbc(&cipher)).await,
+        StatusCode::CREATED
+    );
+    state.saber.wait_idle().await;
+
+    let pdf = two_page_pdf();
+    sync_upserts(
+        &app,
+        &[
+            ("Uni/Slides/Lecture 1.pdf", pdf.as_slice()),
+            ("Uni/Reading.md", b"Untagged note about [[Lecture 1.pdf]]"),
+            (
+                "Uni/Week 1.md",
+                b"---\ntags: [uni, tablet]\n---\nSlides: ![[Lecture 1.pdf]]\n",
+            ),
+        ],
+    )
+    .await;
+    state.tablet.wait_idle().await;
+
+    // The Saber note and its PDF asset sit in the sync folder under their encrypted names.
+    let note_name = cipher.encrypt_file_name("/Uni/Slides/Lecture 1.sbn2");
+    let asset_name = cipher.encrypt_file_name("/Uni/Slides/Lecture 1.sbn2.0");
+    let (_, encrypted_note) = state
+        .vaults
+        .dav_read("alice", "notes", &format!("Tablet/.sync/{note_name}"))
+        .await
+        .expect("saber note pushed");
+    let note = Note::parse(&cipher.decrypt(&encrypted_note).unwrap()).unwrap();
+    assert_eq!(note.pages.len(), 3);
+    assert_eq!(note.pages[0].height, 1415.0);
+    assert_eq!(
+        note.pages[1].background_image.as_ref().unwrap().pdf_page,
+        Some(1)
+    );
+    let (_, encrypted_asset) = state
+        .vaults
+        .dav_read("alice", "notes", &format!("Tablet/.sync/{asset_name}"))
+        .await
+        .unwrap();
+    assert_eq!(cipher.decrypt(&encrypted_asset).unwrap(), pdf);
+
+    // Saber sees exactly what another Saber device would have uploaded.
+    let response = request(
+        &app,
+        "PROPFIND",
+        "/remote.php/webdav/Saber/",
+        Some(&auth),
+        &[("depth", "1")],
+        vec![],
+    )
+    .await;
+    let listing = text(response).await;
+    assert!(listing.contains(&note_name));
+
+    // A second sync of the same note does not push again; the record survives restarts.
+    let entry_before = state
+        .vaults
+        .dav_stat("alice", "notes", &format!("Tablet/.sync/{note_name}"))
+        .await
+        .unwrap()
+        .unwrap();
+    sync_upserts(
+        &app,
+        &[(
+            "Uni/Week 1.md",
+            b"---\ntags: [uni, tablet]\n---\nSlides: ![[Lecture 1.pdf]] and more text\n",
+        )],
+    )
+    .await;
+    state.tablet.wait_idle().await;
+    let grant = state
+        .device_passwords
+        .authenticate("alice", &password)
+        .await
+        .unwrap();
+    let _ = grant;
+    let report = state
+        .tablet
+        .run("alice", "notes", &["Uni/Week 1.md".to_string()])
+        .await
+        .unwrap();
+    assert!(report.pushed.is_empty(), "{report:?}");
+    assert_eq!(report.skipped_unchanged, 1);
+    let entry_after = state
+        .vaults
+        .dav_stat("alice", "notes", &format!("Tablet/.sync/{note_name}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry_after.etag, entry_before.etag);
+
+    // Removing the tag forgets the PDF; tagging again pushes it afresh.
+    sync_upserts(
+        &app,
+        &[("Uni/Week 1.md", b"No tag any more ![[Lecture 1.pdf]]\n")],
+    )
+    .await;
+    state.tablet.wait_idle().await;
+    let report = state
+        .tablet
+        .run("alice", "notes", &["Uni/Week 1.md".to_string()])
+        .await
+        .unwrap();
+    assert!(report.pushed.is_empty());
+    sync_upserts(
+        &app,
+        &[("Uni/Week 1.md", b"#tablet again ![[Lecture 1.pdf]]\n")],
+    )
+    .await;
+    state.tablet.wait_idle().await;
+    let report = state
+        .tablet
+        .run("alice", "notes", &["Uni/Week 1.md".to_string()])
+        .await
+        .unwrap();
+    // The scheduled run already pushed; the explicit run finds it unchanged.
+    assert!(
+        report.pushed.is_empty() && report.skipped_unchanged == 1,
+        "{report:?}"
+    );
+}

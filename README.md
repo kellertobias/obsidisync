@@ -364,6 +364,12 @@ Saber's notes land as encrypted `.sbe` files in the sync folder, exactly as they
 
 The connection appears in **Settings → ObsidiSync → Device passwords (WebDAV)** like any other device and can be revoked there. Saber's own "Log in with Saber" button uses the app author's public Nextcloud and is not affected.
 
+#### Sending PDFs to Saber with `#tablet`
+
+The other direction works too. Tag a note with `#tablet` (in the text, or `tags: [tablet]` in its frontmatter) and every PDF it links or embeds (`![[Slides.pdf]]`, `[[Slides.pdf]]`, `[slides](Slides.pdf)`) is pushed into Saber on the next sync, as a Saber note whose pages are the PDF pages, ready to be written on. The Saber note mirrors the vault path: `Uni/Slides.pdf` becomes `Uni/Slides` in Saber. Once you annotate it, the usual round trip renders the annotated version to `Tablet/Uni/Slides.pdf` in the vault; the original PDF is left untouched.
+
+Each PDF is pushed once per Saber device. If the PDF changes later, the copy in Saber is deliberately left alone so existing strokes stay aligned with the page they were drawn on. To push the current file again, remove the tag, sync, and add it back. Removing the tag never deletes anything in Saber. Links are resolved like Obsidian does: exact vault path, path relative to the note, or a unique file name anywhere in the vault. The server keeps the push record in `saber-push.json` next to the vault; the first sync after a server start scans the whole vault for tagged notes, later syncs only look at changed notes.
+
 What the renderer draws: page background colour and ruling (lined, college, grid, dots, staffs, tablature, Cornell), fountain pen, ballpoint and shape-pen strokes with pressure, pencil strokes (as lighter fills), highlighter strokes (translucent), PNG/JPEG images, and typed text as plain Helvetica. Pages of imported PDFs and SVG images are drawn as labelled placeholders. Notes in Saber's legacy `.sbn` JSON format are stored but not rendered.
 
 Security notes:

@@ -8,5 +8,6 @@
 pub mod crypto;
 pub mod freehand;
 pub mod pdf;
+pub mod push;
 pub mod sbn;
 pub mod sync;
