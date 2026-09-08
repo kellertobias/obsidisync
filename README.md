@@ -349,6 +349,13 @@ Files uploaded over WebDAV are committed to the vault repository under the devic
 
 The endpoint implements WebDAV class 1 (`OPTIONS`, `PROPFIND` with depth 0 or 1, `GET`, `HEAD`, `PUT`, `DELETE`, `MKCOL`, `MOVE`, `COPY`) plus advisory `LOCK`/`UNLOCK` so class 2 clients such as macOS Finder or Windows Explorer work too. Downloads support single byte ranges (`Range: bytes=...`) for PDF viewers that read files in place. Uploads are streamed to disk, so large PDFs do not have to fit into server memory, and are limited by `OBSIDIAN_GIT_SYNC_WEBDAV_MAX_BODY_BYTES` (default 200 MB). If the server sits behind a reverse proxy, raise its request body limit for `/dav/` as well (for nginx, `client_max_body_size`; its default of 1 MB rejects most PDF uploads with `413`). Re-uploading an unchanged file is a no-op and does not create a new version.
 
+### InkVault editable handwriting
+
+Native InkVault clients can publish editable source packages and server-rendered
+PDFs as one recoverable Git revision. Ordinary Obsidian clients receive the PDF.
+See [the InkVault notes v1 protocol](docs/INKVAULT_NOTES_V1.md) for negotiation,
+annotation, conflict resolution, recovery, and rendering limits.
+
 ### Saber handwritten notes (Nextcloud emulation)
 
 [Saber](https://github.com/saber-notes/saber) is an open-source handwriting app that syncs through Nextcloud with end-to-end encryption. ObsidiSync can stand in for that Nextcloud server: Saber logs in against the sync server, uploads its encrypted notes into one vault folder (so all Saber devices stay in sync through the server), and — if you trust the server with your Saber encryption password — the server decrypts each note and writes a PDF next to it in the vault, refreshed every time the note changes. The PDFs open in Obsidian like any other attachment.

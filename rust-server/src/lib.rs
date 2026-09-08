@@ -16,3 +16,5 @@ pub mod time_format;
 pub mod vault;
 pub mod version_registry;
 pub mod webdav;
+
+pub mod inkvault;

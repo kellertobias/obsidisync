@@ -116,6 +116,9 @@ pub fn repo_path(repo_root: &Path, vault_path: &str) -> Result<PathBuf> {
 }
 
 pub fn is_text_or_code_path(path: &str) -> bool {
+    if path.starts_with(".inkvault/") {
+        return false;
+    }
     let lower = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let extension = lower.rsplit('.').next().unwrap_or("");
     matches!(

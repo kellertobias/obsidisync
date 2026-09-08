@@ -133,7 +133,13 @@ impl VaultService {
                 Vec::new()
             };
             paths.retain(|path| !is_hidden_path(path) && !manifest.files.contains_key(path));
-            paths.extend(manifest.files.keys().cloned());
+            paths.extend(
+                manifest
+                    .files
+                    .keys()
+                    .filter(|p| !is_hidden_path(p))
+                    .cloned(),
+            );
             paths.sort();
             paths.dedup();
             Ok(paths)
@@ -214,6 +220,12 @@ impl VaultService {
             let state = self.read_registered_state(&user, &vault).await?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
+            self.guard_inkvault_paths(
+                &repo,
+                &self.binary_dir(&user, &vault),
+                std::slice::from_ref(&path),
+            )
+            .await?;
             let mut manifest = read_manifest(&repo).await?;
             let existing = stat_unlocked(&repo, &manifest, &path).await?;
             if existing.as_ref().is_some_and(|entry| entry.is_dir) {
@@ -259,6 +271,12 @@ impl VaultService {
         self.with_lock(&user, &vault, || async {
             let state = self.read_registered_state(&user, &vault).await?;
             let repo = self.repo_dir(&user, &vault);
+            self.guard_inkvault_paths(
+                &repo,
+                &self.binary_dir(&user, &vault),
+                std::slice::from_ref(&path),
+            )
+            .await?;
             let mut manifest = read_manifest(&repo).await?;
             let entry = stat_unlocked(&repo, &manifest, &path)
                 .await?
@@ -337,6 +355,12 @@ impl VaultService {
             let state = self.read_registered_state(&user, &vault).await?;
             let repo = self.repo_dir(&user, &vault);
             let binary_root = self.binary_dir(&user, &vault);
+            self.guard_inkvault_paths(
+                &repo,
+                &self.binary_dir(&user, &vault),
+                &[from.clone(), to.clone()],
+            )
+            .await?;
             let mut manifest = read_manifest(&repo).await?;
             let source = stat_unlocked(&repo, &manifest, &from)
                 .await?
@@ -478,7 +502,9 @@ pub fn validate_dav_path(path: &str) -> Result<String> {
 }
 
 fn is_hidden_path(path: &str) -> bool {
-    path == ".git"
+    path == ".inkvault"
+        || path.starts_with(".inkvault/")
+        || path == ".git"
         || path.starts_with(".git/")
         || path == ".obsidian-git-sync"
         || path.starts_with(".obsidian-git-sync/")
@@ -593,6 +619,9 @@ async fn list_unlocked(repo: &Path, manifest: &BinaryManifest, dir: &str) -> Res
 
     let prefix = manifest_prefix(dir);
     for (key, entry) in &manifest.files {
+        if is_hidden_path(key) {
+            continue;
+        }
         let Some(rest) = key.strip_prefix(&prefix) else {
             continue;
         };

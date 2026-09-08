@@ -25,6 +25,7 @@ const MIN_CLIENT_API_VERSION: u32 = 1;
 /// Optional capabilities advertised to clients. Older plugins ignore the list; newer plugins
 /// hide or explain features that the server they talk to does not have yet.
 const SERVER_FEATURES: &[&str] = &[
+    "inkVaultNotesV1",
     "webdavDevicePasswords",
     "syncFileReferences",
     "saberNextcloud",
@@ -164,6 +165,8 @@ impl IntoResponse for ApiError {
             || message.contains("password is not set")
         {
             StatusCode::UNAUTHORIZED
+        } else if message.starts_with("InkNote changed since conflict") {
+            StatusCode::CONFLICT
         } else if message.contains("forbidden") {
             StatusCode::FORBIDDEN
         } else if message.contains("not found") || message.contains("Unknown vault") {
@@ -230,6 +233,10 @@ pub fn router_with_webdav_limit(
             post(complete_upload),
         )
         .route("/v1/users/:user/vaults/:vault/sync", post(sync))
+        .route(
+            "/v1/users/:user/vaults/:vault/inkvault/resolve",
+            post(resolve_inkvault),
+        )
         .route("/v1/users/:user/vaults/:vault/history", get(history))
         .route("/v1/users/:user/vaults/:vault/file", get(file_at_version))
         .route("/v1/users/:user/vaults/:vault/blob", get(blob_at_version))
@@ -313,7 +320,8 @@ fn public_error_message(status: StatusCode, message: &str) -> String {
 }
 
 fn is_public_client_error(message: &str) -> bool {
-    message.starts_with("invalid ")
+    message.starts_with("InkNote ")
+        || message.starts_with("invalid ")
         || message.starts_with("unsafe vault path")
         || message.starts_with("local git remotes are disabled")
         || message.starts_with("git remote ")
@@ -835,7 +843,25 @@ async fn sync(
             ClientChange::Upsert { path, .. } | ClientChange::Delete { path } => path.clone(),
         })
         .collect();
-    let response = state.vaults.sync(&user, &vault, request).await?;
+    let native = inkvault_client(&headers);
+    let has_source = request
+        .changes
+        .iter()
+        .any(|c| crate::inkvault::is_source(crate::vault::inkvault::change_path(c)));
+    let mut response = if native && has_source {
+        state.vaults.sync_inkvault(&user, &vault, request).await?
+    } else {
+        state
+            .vaults
+            .sync_with_sources(&user, &vault, request, native)
+            .await?
+    };
+    if !native {
+        response
+            .files
+            .retain(|f| !crate::inkvault::is_source(crate::vault::inkvault::file_path(f)));
+    }
+
     state.tablet.schedule(&user, &vault, changed);
     Ok(Json(response))
 }
@@ -885,6 +911,9 @@ async fn history(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<HistoryEntry>>, ApiError> {
     authorize(&state, &headers, &user).await?;
+    if let Some(path) = &query.path {
+        authorize_inkvault_path(&headers, path)?;
+    }
     Ok(Json(
         state
             .vaults
@@ -900,6 +929,7 @@ async fn file_at_version(
     Query(query): Query<FileQuery>,
 ) -> Result<Json<VersionFileResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
+    authorize_inkvault_path(&headers, &query.path)?;
     Ok(Json(
         state
             .vaults
@@ -917,6 +947,7 @@ async fn blob_at_version(
     Query(query): Query<FileQuery>,
 ) -> Result<Response, ApiError> {
     authorize(&state, &headers, &user).await?;
+    authorize_inkvault_path(&headers, &query.path)?;
     let (path, content) = state
         .vaults
         .file_bytes_at_version(&user, &vault, &query.path, &query.hash)
@@ -946,7 +977,12 @@ async fn resolve(
     Json(request): Json<ResolveRequest>,
 ) -> Result<Json<SyncResponse>, ApiError> {
     authorize(&state, &headers, &user).await?;
-    Ok(Json(state.vaults.resolve(&user, &vault, request).await?))
+    Ok(Json(
+        state
+            .vaults
+            .resolve_with_sources(&user, &vault, request, inkvault_client(&headers))
+            .await?,
+    ))
 }
 
 async fn devices(
@@ -1170,4 +1206,35 @@ fn cookie_decode(value: &str) -> Option<String> {
         }
     }
     String::from_utf8(output).ok()
+}
+
+fn inkvault_client(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-obsidisync-client-features")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|f| f.trim() == crate::inkvault::FEATURE))
+}
+fn authorize_inkvault_path(headers: &HeaderMap, path: &str) -> Result<(), ApiError> {
+    if crate::inkvault::is_source(path) && !inkvault_client(headers) {
+        return Err(anyhow::anyhow!("InkNote source requires inkVaultNotesV1").into());
+    }
+    Ok(())
+}
+
+async fn resolve_inkvault(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((user, vault)): Path<(String, String)>,
+    Json(request): Json<SyncRequest>,
+) -> Result<Json<SyncResponse>, ApiError> {
+    authorize(&state, &headers, &user).await?;
+    if !inkvault_client(&headers) {
+        return Err(anyhow::anyhow!("paired resolution requires inkVaultNotesV1").into());
+    }
+    Ok(Json(
+        state
+            .vaults
+            .resolve_inkvault(&user, &vault, request)
+            .await?,
+    ))
 }

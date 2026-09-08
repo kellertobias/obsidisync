@@ -46,7 +46,7 @@ pub async fn write_manifest(repo: &Path, manifest: &BinaryManifest) -> Result<()
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    fs::write(path, serde_json::to_vec_pretty(manifest)?).await?;
+    crate::vault::inkvault::durable_write(&path, &serde_json::to_vec_pretty(manifest)?).await?;
     Ok(())
 }
 
@@ -64,7 +64,7 @@ pub async fn store_binary(
         fs::create_dir_all(parent).await?;
     }
     if fs::metadata(&absolute).await.is_err() {
-        fs::write(&absolute, content).await?;
+        crate::vault::inkvault::durable_write(&absolute, content).await?;
     }
     Ok(BinaryEntry {
         sha256: sha,

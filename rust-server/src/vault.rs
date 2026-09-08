@@ -26,6 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 pub mod dav;
+pub mod inkvault;
 
 const UPLOAD_CHUNK_SIZE_BYTES: u64 = 512 * 1024;
 const PENDING_CONFLICTS_PATH: &str = "pending-conflicts.json";
@@ -266,6 +267,15 @@ impl VaultService {
         vault: &str,
         request: SyncRequest,
     ) -> Result<SyncResponse> {
+        self.sync_with_sources(user, vault, request, false).await
+    }
+    pub async fn sync_with_sources(
+        &self,
+        user: &str,
+        vault: &str,
+        request: SyncRequest,
+        include_sources: bool,
+    ) -> Result<SyncResponse> {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         self.with_lock(&user, &vault, || async {
@@ -302,6 +312,17 @@ impl VaultService {
                         .await;
                 }
             }
+
+            self.guard_inkvault_paths(
+                &repo,
+                &binary_root,
+                &request
+                    .changes
+                    .iter()
+                    .map(|c| inkvault::change_path(c).to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
 
             let conflicts = self
                 .apply_client_changes(
@@ -393,6 +414,7 @@ impl VaultService {
                     base_head.as_deref(),
                     &request.client_manifest,
                     request.file_content.is_inline(),
+                    include_sources,
                 )
                 .await?;
 
@@ -896,6 +918,15 @@ impl VaultService {
         vault: &str,
         request: ResolveRequest,
     ) -> Result<SyncResponse> {
+        self.resolve_with_sources(user, vault, request, false).await
+    }
+    pub async fn resolve_with_sources(
+        &self,
+        user: &str,
+        vault: &str,
+        request: ResolveRequest,
+        include_sources: bool,
+    ) -> Result<SyncResponse> {
         let user = validate_slug(user, "user")?;
         let vault = validate_slug(vault, "vault")?;
         self.with_lock(&user, &vault, || async {
@@ -905,6 +936,16 @@ impl VaultService {
             let binary_root = self.binary_dir(&user, &vault);
             let upload_root = self.upload_dir(&user, &vault);
             let inline = request.file_content.is_inline();
+            self.guard_inkvault_paths(
+                &repo,
+                &binary_root,
+                &request
+                    .files
+                    .iter()
+                    .map(|f| f.path.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
             let mut resolved_paths = Vec::new();
             for file in request.files {
                 let safe = validate_vault_path(&file.path)?;
@@ -993,7 +1034,7 @@ impl VaultService {
             .map(|conflict| conflict.path)
             .collect();
             let files = self
-                .changed_files_since(&repo, &binary_root, None, &[], inline)
+                .changed_files_since(&repo, &binary_root, None, &[], inline, include_sources)
                 .await?
                 .into_iter()
                 .filter(|file| !still_pending.contains(file_path(file)))
@@ -1045,6 +1086,7 @@ impl VaultService {
     async fn ensure_remote_branch(&self, repo: &Path, branch: &str) -> Result<()> {
         let branch = validate_git_branch(branch)?;
         let remote_branch = format!("origin/{branch}");
+
         self.fetch(repo).await?;
         let remote = git(
             Some(repo),
@@ -1213,6 +1255,7 @@ impl VaultService {
         Ok(conflicts)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn changed_files_since(
         &self,
         repo: &Path,
@@ -1220,6 +1263,7 @@ impl VaultService {
         base_head: Option<&str>,
         client_manifest: &[ManifestEntry],
         inline: bool,
+        include_sources: bool,
     ) -> Result<Vec<ServerFileChange>> {
         let mut files = Vec::new();
         let client_manifest_by_path: HashMap<&str, &ManifestEntry> = client_manifest
@@ -1289,6 +1333,9 @@ impl VaultService {
             BinaryManifest::default()
         };
         for (path, entry) in current_manifest.files.iter() {
+            if !include_sources && crate::inkvault::is_source(path) {
+                continue;
+            }
             if previous_manifest.files.get(path) != Some(entry) {
                 if base_head.is_none()
                     && client_has_manifest_entry(
@@ -1314,12 +1361,56 @@ impl VaultService {
             }
         }
         for path in previous_manifest.files.keys() {
+            if !include_sources && crate::inkvault::is_source(path) {
+                continue;
+            }
             if !current_manifest.files.contains_key(path) {
                 files.push(ServerFileChange::Delete { path: path.clone() });
             }
         }
 
         files.sort_by(|left, right| file_path(left).cmp(file_path(right)));
+        // Send a complete pair whenever any member changed, so clients can preserve conflicts atomically.
+        let mut roots = BTreeSet::new();
+        for f in &files {
+            if let Ok(root) = crate::inkvault::document_root(inkvault::file_path(f)) {
+                roots.insert(root);
+            }
+        }
+        for root in roots {
+            let prefix = format!("{root}/");
+            let manifest_path = format!("{root}/manifest.json");
+            let mut paths: BTreeSet<String> = current_manifest
+                .files
+                .keys()
+                .chain(previous_manifest.files.keys())
+                .filter(|p| p.starts_with(&prefix))
+                .cloned()
+                .collect();
+            for ledger in [&current_manifest, &previous_manifest] {
+                if let Some(entry) = ledger.files.get(&manifest_path) {
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&read_binary_object(binary_root, entry).await?)?;
+                    paths.insert(crate::inkvault::text(&value, "pdfPath")?.to_string());
+                }
+            }
+            files.retain(|f| !paths.contains(inkvault::file_path(f)));
+            for path in paths {
+                files.push(match current_manifest.files.get(&path) {
+                    Some(entry) => ServerFileChange::Upsert {
+                        path,
+                        sha256: entry.sha256.clone(),
+                        size: Some(entry.size),
+                        content_base64: if inline {
+                            Some(STANDARD.encode(read_binary_object(binary_root, entry).await?))
+                        } else {
+                            None
+                        },
+                    },
+                    None => ServerFileChange::Delete { path },
+                });
+            }
+        }
         Ok(files)
     }
 
@@ -1344,6 +1435,42 @@ impl VaultService {
     async fn rebase_remote(&self, repo: &Path, branch: &str) -> Result<Option<Vec<SyncConflict>>> {
         let branch = validate_git_branch(branch)?;
         let remote_branch = format!("origin/{branch}");
+        if read_manifest(repo)
+            .await?
+            .files
+            .keys()
+            .any(|p| crate::inkvault::is_source(p))
+        {
+            let remote = git(
+                Some(repo),
+                &["rev-parse", "--verify", &remote_branch],
+                &[0, 128],
+            )
+            .await?;
+            if remote.code != 0 {
+                return Ok(None);
+            }
+            let ancestor = git(
+                Some(repo),
+                &["merge-base", "--is-ancestor", &remote_branch, "HEAD"],
+                &[0, 1],
+            )
+            .await?;
+            if ancestor.code == 0 {
+                return Ok(None);
+            }
+            let ff = git(
+                Some(repo),
+                &["merge", "--ff-only", &remote_branch],
+                &[0, 1, 128],
+            )
+            .await?;
+            if ff.code == 0 {
+                return Ok(None);
+            }
+            bail!("InkNote remote diverged; reconcile the vault before publishing");
+        }
+
         let remote = git(
             Some(repo),
             &["rev-parse", "--verify", &remote_branch],
@@ -1454,7 +1581,7 @@ impl VaultService {
         {
             Ok(files) => files,
             Err(_) => {
-                self.changed_files_since(repo, binary_root, base_head, &[], true)
+                self.changed_files_since(repo, binary_root, base_head, &[], true, false)
                     .await?
             }
         };
@@ -1764,6 +1891,7 @@ impl VaultService {
                 .clone()
         };
         let _guard = lock.lock().await;
+        self.recover_inkvault(user, vault).await?;
         operation().await
     }
 }
