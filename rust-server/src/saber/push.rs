@@ -709,7 +709,7 @@ mod tests {
     fn detects_body_and_frontmatter_tags() {
         assert!(has_tag("Read this #tablet later", "tablet"));
         assert!(has_tag("#Tablet/uni at the start", "tablet"));
-        assert!(has_tag("tags: [#tablet]\n", "tablet") || true);
+        assert!(has_tag("tags: [#tablet]\n", "tablet"));
         assert!(!has_tag("a #tablets b", "tablet"));
         assert!(!has_tag("email#tablet", "tablet"));
         assert!(has_tag("---\ntags: [uni, tablet]\n---\nbody", "tablet"));
