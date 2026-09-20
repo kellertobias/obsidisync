@@ -115,9 +115,9 @@ impl AuthVerifier {
         data_dir: impl Into<PathBuf>,
         zitadel: Option<ZitadelAuthorization>,
     ) -> Result<Self> {
-        let issuer = validate_oidc_https_url(&issuer, "OIDC issuer")?;
+        let issuer = validate_oidc_url_keep_path(&issuer, "OIDC issuer")?;
         let jwks_url = jwks_url
-            .map(|url| validate_oidc_https_url(&url, "OIDC JWKS URL"))
+            .map(|url| validate_oidc_url_keep_path(&url, "OIDC JWKS URL"))
             .transpose()?;
         Ok(Self::Oidc(Arc::new(OidcVerifier {
             issuer,
@@ -371,7 +371,7 @@ impl OidcVerifier {
             .error_for_status()?
             .json::<OpenIdConfiguration>()
             .await?;
-        validate_oidc_https_url(&configuration.jwks_uri, "OIDC JWKS URL")
+        validate_oidc_url_keep_path(&configuration.jwks_uri, "OIDC JWKS URL")
     }
 }
 
@@ -418,6 +418,31 @@ fn validate_oidc_https_url(raw_url: &str, label: &str) -> Result<String> {
     let url = Url::parse(trimmed).map_err(|_| anyhow!("{label} must be a valid URL"))?;
     if url.scheme() == "https" || (url.scheme() == "http" && is_localhost(url.host_str())) {
         Ok(trimmed.trim_end_matches('/').to_string())
+    } else {
+        bail!("{label} must use HTTPS, except localhost during development");
+    }
+}
+
+/// Same checks as `validate_oidc_https_url`, but the path is left alone.
+///
+/// Trimming the trailing slash breaks two separate things with providers whose
+/// issuer URL ends in one. authentik is such a provider:
+///
+///   * The JWKS URL is FETCHED. Discovery advertises
+///     `/application/o/<app>/jwks/`; the same path without the slash is a 404.
+///   * The issuer is compared to the `iss` claim as a string
+///     (`validation.set_issuer`, and again in `validate_claims`). authentik
+///     mints `iss` WITH the trailing slash, so a trimmed issuer fails every
+///     token with `InvalidIssuer`.
+///
+/// Keeping it is safe: the two places that build a URL from the issuer
+/// (`discover_jwks_uri` here and `oidc_login::endpoints`) trim it themselves
+/// before appending a path.
+fn validate_oidc_url_keep_path(raw_url: &str, label: &str) -> Result<String> {
+    let trimmed = raw_url.trim();
+    let url = Url::parse(trimmed).map_err(|_| anyhow!("{label} must be a valid URL"))?;
+    if url.scheme() == "https" || (url.scheme() == "http" && is_localhost(url.host_str())) {
+        Ok(trimmed.to_string())
     } else {
         bail!("{label} must use HTTPS, except localhost during development");
     }
